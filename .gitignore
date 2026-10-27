@@ -1,0 +1,20 @@
+
+# macOS / Eclipse workspace
+.DS_Store
+.metadata/
+
+# Build directories, including nested STM32CubeIDE/Debug
+Debug/
+Release/
+build/
+
+# Generated build artifacts
+*.o
+*.d
+*.su
+*.cyclo
+*.elf
+*.map
+*.list
+*.lst
+*.log
