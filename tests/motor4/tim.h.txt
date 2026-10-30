@@ -1,0 +1,45 @@
+#ifndef HOST_TIM_H
+#define HOST_TIM_H
+#include "main.h"
+typedef struct {
+    uint32_t CNT, ARR, CCR1, CCR2, CCR3, CCR4, EGR, CR1;
+    uint32_t pwm_started, encoder_started, update_events;
+} TIM_TypeDef;
+typedef struct { TIM_TypeDef *Instance; } TIM_HandleTypeDef;
+extern TIM_TypeDef host_tim1, host_tim2, host_tim3, host_tim4, host_tim5, host_tim9;
+#define TIM1 (&host_tim1)
+#define TIM2 (&host_tim2)
+#define TIM3 (&host_tim3)
+#define TIM4 (&host_tim4)
+#define TIM5 (&host_tim5)
+#define TIM9 (&host_tim9)
+extern TIM_HandleTypeDef htim1, htim2, htim3, htim4, htim5, htim9;
+#define TIM_CHANNEL_1 0x00U
+#define TIM_CHANNEL_2 0x04U
+#define TIM_CHANNEL_3 0x08U
+#define TIM_CHANNEL_4 0x0CU
+#define TIM_CHANNEL_ALL 0x3CU
+#define TIM_EVENTSOURCE_UPDATE 0x01U
+#define TIM_EGR_UG 0x01U
+#define TIM_CR1_DIR 0x10U
+#define TIM_FLAG_UPDATE 0x01U
+static inline uint32_t *host_ccr(TIM_HandleTypeDef *h, uint32_t channel) {
+    switch (channel) {
+    case TIM_CHANNEL_1: return &h->Instance->CCR1;
+    case TIM_CHANNEL_2: return &h->Instance->CCR2;
+    case TIM_CHANNEL_3: return &h->Instance->CCR3;
+    default: return &h->Instance->CCR4;
+    }
+}
+#define __HAL_TIM_GET_COUNTER(h) ((h)->Instance->CNT)
+#define __HAL_TIM_SET_COUNTER(h, v) ((h)->Instance->CNT = (uint32_t)(v))
+#define __HAL_TIM_GET_AUTORELOAD(h) ((h)->Instance->ARR)
+#define __HAL_TIM_SET_COMPARE(h, ch, v) (*host_ccr((h),(ch)) = (uint32_t)(v))
+#define __HAL_TIM_GET_COMPARE(h, ch) (*host_ccr((h),(ch)))
+#define __HAL_TIM_GENERATE_EVENT(h, ev) do { (h)->Instance->EGR = (ev); ++(h)->Instance->update_events; } while (0)
+#define __HAL_TIM_CLEAR_FLAG(h, f) do { (void)(h); (void)(f); } while (0)
+HAL_StatusTypeDef HAL_TIM_PWM_Start(TIM_HandleTypeDef *h, uint32_t channel);
+HAL_StatusTypeDef HAL_TIM_PWM_Stop(TIM_HandleTypeDef *h, uint32_t channel);
+HAL_StatusTypeDef HAL_TIM_Encoder_Start(TIM_HandleTypeDef *h, uint32_t channel);
+HAL_StatusTypeDef HAL_TIM_Encoder_Stop(TIM_HandleTypeDef *h, uint32_t channel);
+#endif

@@ -1,0 +1,115 @@
+NUCLEO-F401RE + D24A四路TB6612 + 四台12V110RPM编码器电机
+目标：四路独立转速闭环，以及标准X布局麦克纳姆轮的前后、横移、原地旋转。
+
+本文件记录四路CubeMX配置与接线。当前四路代码已安装在Core/Inc和Core/Src，
+不再需要执行导入脚本。改线、生成和下载期间关闭驱动板电源。
+单路的3圈11880计数采用CPR3960；四台同型号先使用相同初值。
+
+当前按键程序：MODE1前进目标85RPM，PWM最高允许100%（千分比1000），
+给最慢轮留出调速余量；底层可接受目标上限仍为110RPM。
+短按并松开USER后等待1秒；启动时从15RPM用1秒升至85RPM，
+从启动共运行10秒后停止（含1秒加速，目标85RPM阶段约9秒）。
+等待时再按取消，运行时再按停止；实际转速取决于电池电压和负载。
+MODE2..6仍保留15RPM低速动作。参数在Core/Inc/robot_app.h，
+反馈故障与软件看门狗继续保留，但软启动不等于硬件电流保护。
+
+一、固定轮序
+从车尾朝车头看，驾驶方向的左右为准：
+A / FL = 左前，B / RL = 左后，C / RR = 右后，D / FR = 右前。
+麦轮滚子轴从车顶看应呈X布局。每个轮子的逻辑正方向统一为推动小车向前。
+
+二、最终引脚表（优先用明确的Morpho排针编号）
+轮位映射已更新为A左前、B左后、C右后、D右前；下方各物理接口的MCU引脚保持原样，无需重新配置CubeMX。
+功能                MCU引脚   排针位置          D24A信号
+A PWM               PA8       CN10-23 / D7     PWMA
+A IN1               PC0       CN7-38 / A5      AIN1
+A IN2               PC1       CN7-36 / A4      AIN2
+A encoder A         PA6       CN10-13 / D12    E1A
+A encoder B         PA7       CN10-15 / D11    E1B
+B PWM               PA9       CN10-21 / D8     PWMB
+B IN1               PC2       CN7-35           BIN1
+B IN2               PC3       CN7-37           BIN2
+B encoder A         PA15      CN7-17           E2A
+B encoder B         PB3       CN10-31 / D3     E2B
+C PWM               PA10      CN10-33 / D2     PWMC
+C IN1               PC4       CN10-34          CIN1
+C IN2               PC5       CN10-6           CIN2
+C encoder A         PB6       CN10-17 / D10    E3A
+C encoder B         PB7       CN7-21           E3B
+D PWM               PA11      CN10-14          PWMD
+D IN1               PC6       CN10-4           DIN1
+D IN2               PC7       CN10-19 / D9     DIN2
+D encoder A         PA0       CN7-28 / A0      E4A
+D encoder B         PA1       CN7-30 / A1      E4B
+shared standby      PA4       CN7-32 / A2      STBY
+common ground       GND       CN6-6/7          GND
+
+保留PA2/PA3的USART2，PA13/PA14的SWD，PC13蓝色USER按键，PA5绿灯。
+3V3/5V电源输出不在两块板之间并联；NUCLEO仍用USB供电。
+当前A路PA0->AIN1、PA1->AIN2必须拆掉，方向线迁移到PC0/PC1。
+原A路PA6/PA7编码器、PA8 PWM和PA4 STBY保持。
+
+三、CubeMX操作顺序
+1. 在当前工程打开F401RE_TB6612.ioc，保留当前84MHz时钟。
+   SYSCLK84MHz，APB1定时器84MHz，APB2定时器84MHz。
+   System Core -> SYS -> Debug保留Serial Wire。
+
+2. 释放将要改用的引脚：
+   PA0、PA1原GPIO输出改为Reset_State，之后用于TIM5。
+   PB3当前标为SYS_JTDO-SWO，右键解除锁定/重置该功能，之后用于TIM2_CH2。
+   PA13/PA14保留SWD，不使用SWO异步Trace。
+
+3. TIM1设置四路PWM：
+   Clock Source: Internal Clock。
+   Channel1..4: 各选择PWM Generation CH1..CH4，不选互补CHxN。
+   显式确认PA8=TIM1_CH1、PA9=CH2、PA10=CH3、PA11=CH4，AF1。
+   Prescaler=0，Counter Mode=Up，Counter Period=4199。
+   Clock Division=DIV1，Repetition Counter=0。
+   四通道均PWM mode1、Pulse0、Polarity High、Fast Disable、Idle Reset。
+   四通道Output Compare Preload均Enable；ARR Preload可保持Disable。
+   Break保持Disable；TIM1自身更新/捕获中断均不启用。
+   84MHz/(4199+1)=20kHz。
+
+4. TIM2、TIM3、TIM4、TIM5各配置Encoder Mode TI1 and TI2：
+   A=TIM3 PA6/PA7，B=TIM2 PA15/PB3，C=TIM4 PB6/PB7，D=TIM5 PA0/PA1。
+   若Cube自动选到其他引脚，在Pinout逐一指定上表的CH1/CH2。
+   全部Prescaler0、Counter Period65535、Clock Division DIV1。
+   两输入均Rising、DirectTI、Input Prescaler DIV1、Input Filter6。
+   输入GPIO NoPull。编码器定时器不启用NVIC中断。
+   TIM2/TIM5虽然是32位，这里也显式填65535，便于统一模差处理。
+   TIM4原来的Prescaler8399和Period99必须改掉。
+   取消NVIC里的TIM4 global interrupt勾选。
+
+5. TIM9新增10ms控制中断：
+   Clock Source选Internal Clock，通道保持Disable，不选择PA2/PA3上的TIM9通道。
+   Prescaler8399、Period99、Up、Clock Division DIV1。
+   System Core -> NVIC勾选TIM1 break interrupt and TIM9 global interrupt。
+   Preemption Priority5、Sub Priority0。
+   TIM9与TIM1的Break共用中断向量，TIM1的Break功能仍保持关闭。
+
+6. GPIO输出：
+   PC0..PC7、PA4均选GPIO_Output，Push Pull、NoPull、Low Speed、初始Low。
+   PC0标签AIN1，PC1标签AIN2；PC2 BIN1、PC3 BIN2；PC4 CIN1、PC5 CIN2；
+   PC6 DIN1、PC7 DIN2；PA4标签STBY。标签便于接线核对。
+   PC13板载B1按键保留现有设置，无需新增按键中断。
+
+7. USART2保持115200、8N1、TX/RX、No Flow Control。
+   Project Manager保留STM32CubeIDE、每外设单独.c/.h、Keep User Code。
+   保存，Generate Code后在CubeIDE刷新工程并编译。
+   保留当前Core中的motor4、mecanum、robot_app和main的USER CODE区，无需再次导入。
+
+四、电机6P与供电
+四路分别接Motor_A/B/C/D，不要仅按插头从左到右或从上到下推定线序。
+逐路确认：电机蓝线最终到3V3、黑线到GND，黄/绿到对应EnA/EnB，
+红/白分别到该路两个电机输出Ox1/Ox2。
+不同接口的绕组两端顺序可能不同；这只影响相序/安装方向，后面用软件校准。
+编码器蓝线不再接NUCLEO3V3，避免两路稳压输出并联。
+电池正负继续接D24A Vin+/Vin-；电机大电流不经过面包板或NUCLEO。
+所有接线完成后，先逐轮开环检查相序和方向，再使用四轮闭环。
+
+参考（原始资料）
+STM32引脚复用： https://www.st.com/resource/en/datasheet/stm32f401re.pdf
+NUCLEO排针： https://www.st.com/resource/en/user_manual/um1724-.pdf
+TIM9与中断： https://www.st.com/resource/en/reference_manual/rm0368-stm32f401xb-c-d-e-mb-reference-manual-stmicroelectronics.pdf
+TB6612控制表： https://toshiba.semicon-storage.com/info/TB6612FNG_datasheet_en_20141001.pdf?did=10660&prodName=TB6612FNG
+麦轮X布局： https://docs.wpilib.org/en/latest/docs/software/hardware-apis/motors/wpi-drive-classes.html

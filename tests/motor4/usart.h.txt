@@ -1,0 +1,8 @@
+#ifndef HOST_USART_H
+#define HOST_USART_H
+#include "main.h"
+typedef struct { int unused; } UART_HandleTypeDef;
+extern UART_HandleTypeDef huart2;
+HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *h, uint8_t *data,
+                                   uint16_t size, uint32_t timeout);
+#endif

@@ -1,0 +1,38 @@
+#ifndef HOST_MAIN_H
+#define HOST_MAIN_H
+#include <stdint.h>
+#include <stddef.h>
+
+typedef enum { HAL_OK = 0, HAL_ERROR = 1, HAL_BUSY = 2, HAL_TIMEOUT = 3 } HAL_StatusTypeDef;
+typedef enum { GPIO_PIN_RESET = 0, GPIO_PIN_SET = 1 } GPIO_PinState;
+typedef struct { uint32_t ODR; } GPIO_TypeDef;
+extern GPIO_TypeDef host_gpio_a, host_gpio_b, host_gpio_c;
+#define GPIOA (&host_gpio_a)
+#define GPIOB (&host_gpio_b)
+#define GPIOC (&host_gpio_c)
+#define GPIO_PIN_0 ((uint16_t)0x0001)
+#define GPIO_PIN_1 ((uint16_t)0x0002)
+#define GPIO_PIN_2 ((uint16_t)0x0004)
+#define GPIO_PIN_3 ((uint16_t)0x0008)
+#define GPIO_PIN_4 ((uint16_t)0x0010)
+#define GPIO_PIN_5 ((uint16_t)0x0020)
+#define GPIO_PIN_6 ((uint16_t)0x0040)
+#define GPIO_PIN_7 ((uint16_t)0x0080)
+#define GPIO_PIN_8 ((uint16_t)0x0100)
+#define GPIO_PIN_9 ((uint16_t)0x0200)
+#define GPIO_PIN_10 ((uint16_t)0x0400)
+#define GPIO_PIN_11 ((uint16_t)0x0800)
+#define GPIO_PIN_12 ((uint16_t)0x1000)
+#define GPIO_PIN_13 ((uint16_t)0x2000)
+#define GPIO_PIN_14 ((uint16_t)0x4000)
+#define GPIO_PIN_15 ((uint16_t)0x8000)
+#define B1_GPIO_Port GPIOC
+#define B1_Pin GPIO_PIN_13
+extern uint32_t host_primask, host_ms;
+static inline uint32_t __get_PRIMASK(void) { return host_primask; }
+static inline void __disable_irq(void) { host_primask = 1; }
+static inline void __set_PRIMASK(uint32_t value) { host_primask = value; }
+uint32_t HAL_GetTick(void);
+void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pins, GPIO_PinState state);
+GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pins);
+#endif

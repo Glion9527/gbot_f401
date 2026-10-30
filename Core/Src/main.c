@@ -24,10 +24,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
-#include "motor.h"
-#include <stdio.h>
-
+#include "motor4.h"
+#include "mecanum.h"
+#include "robot_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,13 +47,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
-/* 方便在调试器中查看电机状态 */
-volatile MotorTelemetry motor_view;
-
-/* 记录上一次串口发送的时间 */
-static uint32_t uart_last_ms;
-
+/* 按键测试和串口状态由robot_app.c管理。 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -65,7 +58,7 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+/* 四路测试逻辑已移入robot_app.c。 */
 /* USER CODE END 0 */
 
 /**
@@ -101,25 +94,20 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM4_Init();
   MX_USART2_UART_Init();
+  MX_TIM2_Init();
+  MX_TIM5_Init();
+  MX_TIM9_Init();
   /* USER CODE BEGIN 2 */
-
-  /* 初始化PWM和编码器，保持电机停止 */
-  if (Motor_Init() != HAL_OK)
-  {
+  if (Motor4_Init() != HAL_OK) {
       Error_Handler();
   }
-
-  /* 清除TIM4初始化期间可能产生的更新标志 */
-  __HAL_TIM_SET_COUNTER(&htim4, 0);
-  __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE);
-
-  /* 最后启动10ms控制中断 */
-  if (HAL_TIM_Base_Start_IT(&htim4) != HAL_OK)
-  {
+  __HAL_TIM_SET_COUNTER(&htim9, 0);
+  __HAL_TIM_CLEAR_FLAG(&htim9, TIM_FLAG_UPDATE);
+  if (HAL_TIM_Base_Start_IT(&htim9) != HAL_OK) {
       Error_Handler();
   }
-
-  /* USER CODE END 2 */
+  RobotApp_Init();
+/* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -128,42 +116,10 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
-      /* 获取一份完整的数据快照 */
-      MotorTelemetry snapshot;
-      Motor_GetTelemetry(&snapshot);
-      motor_view = snapshot;
-
-      /* 每100ms发送一次数据 */
-      if ((uint32_t)(HAL_GetTick() - uart_last_ms) >= 100U)
-      {
-          uart_last_ms = HAL_GetTick();
-
-          char text[96];
-
-          int n = snprintf(
-              text,
-              sizeof(text),
-              "cnt=%ld,d=%ld,pwm=%d\r\n",
-              (long)snapshot.position,
-              (long)snapshot.delta,
-              (int)snapshot.pwm
-          );
-
-          if (n > 0 && (size_t)n < sizeof(text))
-          {
-              HAL_UART_Transmit(
-                  &huart2,
-                  (uint8_t *)text,
-                  (uint16_t)n,
-                  20
-              );
-          }
-      }
-
-      HAL_Delay(5);
+    RobotApp_Poll();
+    HAL_Delay(1);
   }
-  /* USER CODE END 3 */
+/* USER CODE END 3 */
 }
 
 /**
@@ -213,15 +169,12 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-    if (htim->Instance == TIM4)
-    {
-        Motor_ControlTick10ms();
+    if (htim->Instance == TIM9) {
+        Motor4_ControlTick10ms();
     }
 }
-
 /* USER CODE END 4 */
 
 /**
@@ -231,13 +184,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-  HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
   __disable_irq();
-  while (1)
-  {
+  while (1) {
   }
-  /* USER CODE END Error_Handler_Debug */
+/* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
 /**

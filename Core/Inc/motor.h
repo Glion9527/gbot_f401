@@ -16,16 +16,16 @@
  * 编码器四倍频后，减速箱输出轴每转的计数。
  * 1320只是示例，确认电机参数后必须修改。
  */
-#define MOTOR_ENCODER_CPR   1320.0f
+#define MOTOR_ENCODER_CPR   3960.0f
 
 /* 正向驱动应测得正转速；方向相反时改成 -1 */
-#define MOTOR_ENCODER_SIGN  (+1)
+#define MOTOR_ENCODER_SIGN  (-1)
 
 /* PWM千分比上限：300表示30%，这不是电流限制 */
 #define MOTOR_PWM_LIMIT     300
 
 /* PI教学起始参数，后面根据实际电机调整 */
-#define MOTOR_KP            2.0f
+#define MOTOR_KP            10.0f
 #define MOTOR_KI            10.0f
 
 /* 电机运行数据 */

@@ -1,0 +1,1057 @@
+#include "motor4.h"
+#include "tim.h"
+#include "usart.h"
+#include "mecanum.h"
+#include "robot_app.h"
+#include <assert.h>
+#include <float.h>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+GPIO_TypeDef host_gpio_a, host_gpio_b, host_gpio_c;
+TIM_TypeDef host_tim1, host_tim2, host_tim3, host_tim4, host_tim5, host_tim9;
+TIM_HandleTypeDef htim1 = { TIM1 }, htim2 = { TIM2 }, htim3 = { TIM3 };
+TIM_HandleTypeDef htim4 = { TIM4 }, htim5 = { TIM5 }, htim9 = { TIM9 };
+uint32_t host_primask, host_ms;
+static unsigned start_calls, fail_start_at;
+static unsigned passed;
+static unsigned stby_low_writes;
+void Host_EmulateMCUReset(void);
+void Host_InjectFault(unsigned source, uint8_t fault);
+unsigned host_set_all_calls;
+UART_HandleTypeDef huart2;
+static bool host_button;
+static char host_uart[65536];
+static size_t host_uart_length;
+static unsigned host_irq_phase_ms;
+static unsigned host_delay_events, host_run_events;
+static uint32_t host_delay_at, host_run_at;
+
+uint32_t HAL_GetTick(void) { return host_ms; }
+void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pins, GPIO_PinState state)
+{
+    if (port == GPIOA && (pins & GPIO_PIN_4) != 0 && state == GPIO_PIN_RESET) {
+        ++stby_low_writes;
+    }
+    if (state == GPIO_PIN_SET) port->ODR |= pins;
+    else port->ODR &= ~(uint32_t)pins;
+}
+GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pins)
+{
+    if (port == B1_GPIO_Port && pins == B1_Pin) {
+        return host_button ? GPIO_PIN_RESET : GPIO_PIN_SET;
+    }
+    return (port->ODR & pins) != 0 ? GPIO_PIN_SET : GPIO_PIN_RESET;
+}
+HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *h, uint8_t *data,
+                                   uint16_t size, uint32_t timeout)
+{
+    (void)h;
+    (void)timeout;
+    if (size >= 6U && memcmp(data, "DELAY ", 6) == 0) {
+        ++host_delay_events;
+        host_delay_at = host_ms;
+    }
+    if (size >= 4U && memcmp(data, "RUN ", 4) == 0) {
+        ++host_run_events;
+        host_run_at = host_ms;
+    }
+    size_t available = sizeof(host_uart) - host_uart_length - 1U;
+    size_t copied = size < available ? size : available;
+    memcpy(host_uart + host_uart_length, data, copied);
+    host_uart_length += copied;
+    host_uart[host_uart_length] = 0;
+    return HAL_OK;
+}
+static HAL_StatusTypeDef start_result(void)
+{
+    ++start_calls;
+    return fail_start_at == start_calls ? HAL_ERROR : HAL_OK;
+}
+HAL_StatusTypeDef HAL_TIM_PWM_Start(TIM_HandleTypeDef *h, uint32_t channel)
+{
+    HAL_StatusTypeDef result = start_result();
+    if (result == HAL_OK) h->Instance->pwm_started |= 1U << (channel / 4U);
+    return result;
+}
+HAL_StatusTypeDef HAL_TIM_PWM_Stop(TIM_HandleTypeDef *h, uint32_t channel)
+{
+    h->Instance->pwm_started &= ~(1U << (channel / 4U));
+    return HAL_OK;
+}
+HAL_StatusTypeDef HAL_TIM_Encoder_Start(TIM_HandleTypeDef *h, uint32_t channel)
+{
+    HAL_StatusTypeDef result = start_result();
+    if (result == HAL_OK) h->Instance->encoder_started = channel;
+    return result;
+}
+HAL_StatusTypeDef HAL_TIM_Encoder_Stop(TIM_HandleTypeDef *h, uint32_t channel)
+{
+    (void)channel;
+    h->Instance->encoder_started = 0;
+    return HAL_OK;
+}
+
+/* Logical order FL,FR,RL,RR maps to physical D24A A,D,B,C. */
+static TIM_HandleTypeDef *const encoders[4] = { &htim3, &htim5, &htim2, &htim4 };
+static const uint32_t channels[4] = { TIM_CHANNEL_1, TIM_CHANNEL_4, TIM_CHANNEL_2, TIM_CHANNEL_3 };
+static const unsigned direction_shifts[4] = {0, 6, 2, 4};
+static const int enc_sign[4] = {
+    MOTOR4_FL_ENCODER_SIGN, MOTOR4_FR_ENCODER_SIGN,
+    MOTOR4_RL_ENCODER_SIGN, MOTOR4_RR_ENCODER_SIGN
+};
+static const int drive_sign[4] = {
+    MOTOR4_FL_DRIVE_SIGN, MOTOR4_FR_DRIVE_SIGN,
+    MOTOR4_RL_DRIVE_SIGN, MOTOR4_RR_DRIVE_SIGN
+};
+
+static void reset_hardware(void)
+{
+    Host_EmulateMCUReset();
+    memset(&host_gpio_a, 0, sizeof(host_gpio_a));
+    memset(&host_gpio_b, 0, sizeof(host_gpio_b));
+    memset(&host_gpio_c, 0, sizeof(host_gpio_c));
+    memset(&host_tim1, 0, sizeof(host_tim1));
+    memset(&host_tim2, 0, sizeof(host_tim2));
+    memset(&host_tim3, 0, sizeof(host_tim3));
+    memset(&host_tim4, 0, sizeof(host_tim4));
+    memset(&host_tim5, 0, sizeof(host_tim5));
+    memset(&host_tim9, 0, sizeof(host_tim9));
+    host_tim1.ARR = 4199;
+    for (unsigned i = 0; i < 4; ++i) encoders[i]->Instance->ARR = 65535;
+    host_primask = host_ms = 0;
+    start_calls = fail_start_at = 0;
+    stby_low_writes = 0;
+    host_button = false;
+    host_uart_length = 0;
+    host_uart[0] = 0;
+    host_set_all_calls = 0;
+    host_irq_phase_ms = 0;
+    host_delay_events = host_run_events = 0;
+    host_delay_at = host_run_at = 0;
+}
+static void fresh(void)
+{
+    reset_hardware();
+    assert(Motor4_Init() == HAL_OK);
+}
+static Motor4Telemetry view(unsigned index)
+{
+    Motor4Telemetry result;
+    assert(Motor4_GetTelemetry((Motor4Id)index, &result));
+    return result;
+}
+static void raw_tick(const int deltas[4], bool feed)
+{
+    for (unsigned i = 0; i < 4; ++i) {
+        uint32_t counter = encoders[i]->Instance->CNT;
+        encoders[i]->Instance->CNT = (counter + (uint32_t)deltas[i]) & 65535U;
+    }
+    host_ms += 10;
+    if (feed) Motor4_FeedWatchdog();
+    Motor4_ControlTick10ms();
+    assert(host_primask == 0);
+}
+static void tick(int fl, int fr, int rl, int rr, bool feed)
+{
+    const int logical[4] = { fl, fr, rl, rr };
+    int raw[4];
+    for (unsigned i = 0; i < 4; ++i) raw[i] = logical[i] * enc_sign[i] * drive_sign[i];
+    raw_tick(raw, feed);
+}
+static void quiet(unsigned count)
+{
+    for (unsigned i = 0; i < count; ++i) tick(0, 0, 0, 0, false);
+}
+static void assert_all_stopped(void)
+{
+    assert((GPIOA->ODR & GPIO_PIN_4) == 0);
+    for (unsigned i = 0; i < 4; ++i) {
+        Motor4Telemetry t = view(i);
+        assert(t.mode == 0 && t.pwm == 0 && t.target_rpm == 0.0f);
+    }
+}
+static void assert_direction(unsigned index, int logical_direction)
+{
+    unsigned shift = direction_shifts[index];
+    uint32_t pair = (GPIOC->ODR >> shift) & 3U;
+    assert(pair == (logical_direction * drive_sign[index] > 0 ? 1U : 2U));
+}
+static void done(const char *name)
+{
+    ++passed;
+    printf("PASS %s\n", name);
+}
+
+static void test_calibrated_configuration(void)
+{
+    assert(MOTOR4_PWM_LIMIT == 1000);
+    assert(MOTOR4_MAX_TARGET_RPM == 110.0f);
+#ifdef HOST_SIGN_OVERRIDES
+    const int expected_encoder[4] = {1, 1, 1, -1};
+    const int expected_drive[4] = {-1, 1, 1, 1};
+#else
+    const int expected_encoder[4] = {-1, 1, 1, -1};
+    const int expected_drive[4] = {-1, -1, 1, 1};
+#endif
+    for (unsigned i = 0; i < 4; ++i) {
+        assert(enc_sign[i] == expected_encoder[i]);
+        assert(drive_sign[i] == expected_drive[i]);
+    }
+    done("calibrated FL/FR/RL/RR signs and A/D/B/C physical routing contract");
+}
+
+static void test_init_and_failure_cleanup(void)
+{
+    fresh();
+    assert_all_stopped();
+    assert(host_tim1.pwm_started == 15U);
+    for (unsigned i = 0; i < 4; ++i) {
+        Motor4Telemetry t = view(i);
+        assert(t.position == 0 && t.delta == 0 && t.rpm == 0.0f && t.fault == 0);
+        assert(encoders[i]->Instance->encoder_started == TIM_CHANNEL_ALL);
+    }
+    for (unsigned fail = 1; fail <= 8; ++fail) {
+        reset_hardware();
+        fail_start_at = fail;
+        assert(Motor4_Init() != HAL_OK);
+        assert_all_stopped();
+        for (unsigned i = 0; i < 4; ++i) assert(view(i).fault != 0);
+        assert(!Motor4_SetSpeedRPM(MOTOR4_FL, 15));
+    }
+    reset_hardware();
+    host_tim1.ARR = 99;
+    assert(Motor4_Init() != HAL_OK);
+    assert_all_stopped();
+    reset_hardware();
+    host_tim4.ARR = 99;
+    assert(Motor4_Init() != HAL_OK);
+    assert_all_stopped();
+    done("initial STOP and initialization/configuration failure cleanup");
+}
+
+static void test_encoder_mapping_and_wrap(void)
+{
+    /* Physical counter signs for vehicle-forward motion after the rear-wheel
+     * installation correction. Keep this separate from tick()'s conversion. */
+    fresh();
+#ifdef HOST_SIGN_OVERRIDES
+    const int forward_raw[4] = {-1, 1, 1, -1};
+#else
+    const int forward_raw[4] = {1, -1, 1, -1};
+#endif
+    assert(Motor4_SetAllSpeedsRPM(15, 15, 15, 15));
+    raw_tick(forward_raw, true);
+    for (unsigned i = 0; i < 4; ++i) {
+        assert(view(i).delta == 1 && view(i).position == 1);
+        assert(view(i).pwm > 0);
+        assert_direction(i, 1);
+    }
+    fresh();
+    tick(11, 7, -5, 3, false);
+    const int expected[4] = {11, 7, -5, 3};
+    for (unsigned i = 0; i < 4; ++i) {
+        Motor4Telemetry t = view(i);
+        float rpm = (float)expected[i] * 6000.0f / 3960.0f;
+        assert(t.delta == expected[i] && t.position == expected[i]);
+        assert(fabsf(t.rpm_raw - rpm) < 0.001f);
+        assert(fabsf(t.rpm - rpm * 0.25f) < 0.001f);
+    }
+    fresh();
+    const int edge1[4] = {-6, -6, -6, -6};
+    const int edge2[4] = {10, 10, 10, 10};
+    raw_tick(edge1, false); /* 0 -> 65530 */
+    for (unsigned i = 0; i < 4; ++i) assert(view(i).delta == -6 * enc_sign[i] * drive_sign[i]);
+    raw_tick(edge2, false); /* 65530 -> 4 */
+    for (unsigned i = 0; i < 4; ++i) assert(view(i).delta == 10 * enc_sign[i] * drive_sign[i]);
+    const int edge3[4] = {-10, -10, -10, -10};
+    raw_tick(edge3, false); /* 4 -> 65530 */
+    for (unsigned i = 0; i < 4; ++i) assert(view(i).delta == -10 * enc_sign[i] * drive_sign[i]);
+    fresh();
+    for (unsigned n = 0; n < 100000; ++n) tick(30000, 0, 0, 0, false);
+    assert(view(0).position == INT64_C(3000000000));
+    done("four independent encoder routes, signs, wrap, RPM/filter and 64-bit position");
+}
+
+static void test_pwm_and_shared_stby(void)
+{
+    fresh();
+    const int16_t commands[4] = {100, 150, 200, 250};
+    for (unsigned i = 0; i < 4; ++i) assert(Motor4_SetOpenLoop((Motor4Id)i, commands[i]));
+    tick(1, 1, 1, 1, true);
+    assert((GPIOA->ODR & GPIO_PIN_4) != 0);
+    for (unsigned i = 0; i < 4; ++i) {
+        assert(view(i).pwm == commands[i]);
+        assert(*host_ccr(&htim1, channels[i]) == 4200U * (uint32_t)commands[i] / 1000U);
+        assert_direction(i, 1);
+    }
+    unsigned old_low_writes = stby_low_writes;
+    host_tim1.EGR = 0;
+    tick(1, 1, 1, 1, true);
+    assert(stby_low_writes == old_low_writes);
+    assert(host_tim1.EGR == 0); /* normal duty updates preserve PWM phase */
+    Motor4_Stop(MOTOR4_FL);
+    assert((GPIOA->ODR & GPIO_PIN_4) != 0);
+    assert((GPIOC->ODR & 3U) == 0);
+    assert(host_tim1.CCR1 == 4200U);
+    assert(view(1).pwm == 150 && host_tim1.CCR4 == 630U);
+    Motor4_StopAll();
+    assert_all_stopped();
+
+    fresh();
+    assert(Motor4_SetOpenLoop(MOTOR4_FR, -200));
+    tick(0, -1, 0, 0, true);
+    assert_direction(1, -1);
+    assert(view(1).pwm == -200 && host_tim1.CCR4 == 840U);
+    assert(host_tim1.CCR1 == 4200 && host_tim1.CCR2 == 4200 && host_tim1.CCR3 == 4200);
+    fresh();
+    assert(Motor4_SetOpenLoop(MOTOR4_FL, INT16_MAX));
+    tick(1, 0, 0, 0, true);
+    assert(view(0).pwm == 1000 && host_tim1.CCR1 == 4200);
+    assert_direction(MOTOR4_FL, 1);
+    fresh();
+    assert(Motor4_SetOpenLoop(MOTOR4_FL, INT16_MIN));
+    tick(-1, 0, 0, 0, true);
+    assert(view(0).pwm == -1000 && host_tim1.CCR1 == 4200);
+    assert_direction(MOTOR4_FL, -1);
+    fresh();
+    for (unsigned i = 0; i < 4; ++i) assert(Motor4_SetOpenLoop((Motor4Id)i, 1000));
+    tick(1, 1, 1, 1, true);
+    for (unsigned i = 0; i < 4; ++i) {
+        assert(view(i).pwm == 1000);
+        assert(*host_ccr(&htim1, channels[i]) == 4200U); /* ARR+1 is full 100%. */
+        assert_direction(i, 1);
+    }
+    assert((GPIOA->ODR & GPIO_PIN_4) != 0);
+    done("four PWM channels, drive polarity, shared STBY and independent coast STOP");
+}
+
+static void assert_targets(const float expected[4])
+{
+    for (unsigned i = 0; i < 4; ++i) assert(view(i).target_rpm == expected[i]);
+}
+static void test_transactions_and_reversal(void)
+{
+    fresh();
+    const float original[4] = {5, 6, 7, 8};
+    assert(Motor4_SetAllSpeedsRPM(5, 6, 7, 8));
+    tick(1, 1, 1, 1, true);
+    assert(!Motor4_SetAllSpeedsRPM(0, 0, NAN, 0));
+    assert_targets(original);
+    assert(!Motor4_SetAllSpeedsRPM(0, INFINITY, 0, 0));
+    assert_targets(original);
+    assert(!Motor4_SetAllSpeedsRPM(0, 0, 0, 110.01f));
+    assert_targets(original);
+    assert(!Motor4_SetAllSpeedsRPM(0, -6, 0, 0));
+    assert_targets(original);
+    assert(!Motor4_SetSpeedRPM((Motor4Id)4, 10));
+    assert(!Motor4_SetOpenLoop((Motor4Id)-1, 100));
+    assert(!Motor4_SetSpeedRPM(MOTOR4_FL, NAN));
+    assert(!Motor4_SetSpeedRPM(MOTOR4_FL, -INFINITY));
+    assert(!Motor4_SetSpeedRPM(MOTOR4_FL, -110.01f));
+    assert_targets(original);
+
+    Motor4_StopAll();
+    quiet(19);
+    assert(!Motor4_SetAllSpeedsRPM(-5, -6, -7, -8));
+    assert_all_stopped();
+    quiet(1);
+    assert(Motor4_SetAllSpeedsRPM(-5, -6, -7, -8));
+    tick(-1, -1, -1, -1, true);
+    assert(view(0).pwm < 0 && view(3).pwm < 0);
+    assert(Motor4_SetAllSpeedsRPM(0, 0, 0, 0));
+    assert_all_stopped();
+    fresh();
+    assert(Motor4_SetAllSpeedsRPM(110, 110, 110, 110));
+    const float positive_limit[4] = {110, 110, 110, 110};
+    assert_targets(positive_limit);
+    assert(!Motor4_SetAllSpeedsRPM(109, 109, 109, 110.01f));
+    assert_targets(positive_limit);
+    fresh();
+    assert(Motor4_SetAllSpeedsRPM(-110, -110, -110, -110));
+    const float negative_limit[4] = {-110, -110, -110, -110};
+    assert_targets(negative_limit);
+    done("transactional validation and 200 ms quiet reversal guard");
+}
+
+static void test_pi_and_antiwindup(void)
+{
+    fresh();
+    assert(Motor4_SetSpeedRPM(MOTOR4_FL, 15));
+    tick(0, 0, 0, 0, true);
+    assert(view(0).pwm == 151);
+    assert(view(0).target_rpm == 15);
+    fresh();
+    assert(Motor4_SetSpeedRPM(MOTOR4_FL, 110));
+    for (unsigned n = 0; n < 200; ++n) tick(1, 0, 0, 0, true);
+    assert(view(0).pwm == 1000 && host_tim1.CCR1 == 4200 && view(0).fault == 0);
+    for (unsigned n = 0; n < 8; ++n) {
+        tick(100, 0, 0, 0, true);
+        assert(view(0).pwm >= 0 && view(0).pwm <= 1000);
+    }
+    assert(view(0).pwm == 0);
+    done("15 RPM PI startup, saturation/anti-windup and fixed-direction overspeed response");
+}
+
+static void test_faults_and_watchdog(void)
+{
+    fresh();
+    assert(Motor4_SetAllSpeedsRPM(15, 15, 15, 15));
+    for (unsigned n = 0; n < 19; ++n) tick(0, 1, 1, 1, true);
+    assert(view(0).fault == 0);
+    tick(0, 1, 1, 1, true);
+    assert_all_stopped();
+    assert(view(0).fault != 0);
+    assert(!Motor4_SetSpeedRPM(MOTOR4_FR, 15));
+    assert(!Motor4_ClearFaults());
+    quiet(20);
+    assert(Motor4_ClearFaults());
+    assert_all_stopped();
+    for (unsigned i = 0; i < 4; ++i) assert(view(i).fault == 0);
+
+    fresh();
+    assert(Motor4_SetSpeedRPM(MOTOR4_FL, 15));
+    for (unsigned n = 0; n < 9; ++n) tick(-1, 0, 0, 0, true);
+    assert(view(0).fault == 0);
+    tick(-1, 0, 0, 0, true);
+    assert_all_stopped();
+    assert(view(0).fault != 0);
+    assert(Motor4_SetAllSpeedsRPM(0, 0, 0, 0));
+    assert(view(0).fault != 0);
+
+    fresh();
+    assert(Motor4_SetSpeedRPM(MOTOR4_FL, 15));
+    for (unsigned n = 0; n < 49; ++n) tick(1, 0, 0, 0, false);
+    assert(view(0).fault == 0);
+    tick(1, 0, 0, 0, false);
+    tick(1, 0, 0, 0, false);
+    assert_all_stopped();
+    for (unsigned i = 0; i < 4; ++i) assert(view(i).fault != 0);
+
+    fresh();
+    assert(Motor4_SetSpeedRPM(MOTOR4_FL, 15));
+    for (unsigned n = 0; n < 200; ++n) tick(1, 0, 0, 0, true);
+    assert(view(0).fault == 0 && view(0).pwm > 0);
+    fresh();
+    host_ms = UINT32_MAX - 100U;
+    assert(Motor4_SetSpeedRPM(MOTOR4_FL, 15));
+    for (unsigned n = 0; n < 40; ++n) tick(1, 0, 0, 0, false);
+    assert(view(0).fault == 0);
+    assert(Motor4_SetSpeedRPM(MOTOR4_FL, 15));
+    for (unsigned n = 0; n < 40; ++n) tick(1, 0, 0, 0, false);
+    assert(view(0).fault == 0);
+    done("feedback/direction/watchdog faults, latch/clear, heartbeat and millisecond wrap");
+}
+
+static void test_critical_sections_and_getters(void)
+{
+    fresh();
+    Motor4Telemetry all[4];
+    assert(!Motor4_GetTelemetry((Motor4Id)4, &all[0]));
+    assert(!Motor4_GetTelemetry(MOTOR4_FL, NULL));
+    Motor4_GetAllTelemetry(NULL);
+    for (uint32_t mask = 0; mask <= 1; ++mask) {
+        host_primask = mask;
+        assert(Motor4_SetSpeedRPM(MOTOR4_FL, 15));
+        assert(host_primask == mask);
+        assert(Motor4_GetTelemetry(MOTOR4_FL, &all[0]));
+        assert(host_primask == mask);
+        Motor4_GetAllTelemetry(all);
+        assert(host_primask == mask);
+        Motor4_FeedWatchdog();
+        assert(host_primask == mask);
+        assert(!Motor4_SetSpeedRPM(MOTOR4_FL, NAN));
+        assert(host_primask == mask);
+        Motor4_Stop(MOTOR4_FL);
+        assert(host_primask == mask);
+        Motor4_StopAll();
+        assert(host_primask == mask);
+        host_ms += 10;
+        Motor4_ControlTick10ms();
+        assert(host_primask == mask);
+    }
+    host_primask = 0;
+    done("telemetry validation and preservation of caller PRIMASK state");
+}
+
+static void near_targets(float fl, float fr, float rl, float rr)
+{
+    const float expected[4] = {fl, fr, rl, rr};
+    for (unsigned i = 0; i < 4; ++i) {
+        assert(fabsf(view(i).target_rpm - expected[i]) < 0.001f);
+    }
+}
+
+static void test_mecanum(void)
+{
+    fresh();
+    assert(Mecanum_SetMixRPM(10, 0, 0));
+    near_targets(10, 10, 10, 10);
+    tick(1, 1, 1, 1, true);
+    for (unsigned i = 0; i < 4; ++i) assert_direction(i, 1);
+    fresh();
+    assert(Mecanum_SetMixRPM(0, 10, 0));
+    near_targets(-10, 10, 10, -10);
+    tick(-1, 1, 1, -1, true);
+    assert_direction(MOTOR4_FL, -1);
+    assert_direction(MOTOR4_FR, 1);
+    assert_direction(MOTOR4_RL, 1);
+    assert_direction(MOTOR4_RR, -1);
+    fresh();
+    assert(Mecanum_SetMixRPM(0, 0, 10));
+    near_targets(-10, 10, -10, 10);
+    tick(-1, 1, -1, 1, true);
+    assert_direction(MOTOR4_FL, -1);
+    assert_direction(MOTOR4_FR, 1);
+    assert_direction(MOTOR4_RL, -1);
+    assert_direction(MOTOR4_RR, 1);
+    fresh();
+    assert(Mecanum_SetMixRPM(100, 40, 20));
+    near_targets(27.5f, 110, 82.5f, 55);
+    assert(!Mecanum_SetMixRPM(NAN, 0, 0));
+    assert(!Mecanum_SetMixRPM(0, INFINITY, 0));
+    assert(!Mecanum_SetMixRPM(0, 0, -INFINITY));
+    near_targets(27.5f, 110, 82.5f, 55);
+    Mecanum_Stop();
+    assert_all_stopped();
+    fresh();
+    assert(Mecanum_SetMixRPM(FLT_MAX, FLT_MAX, FLT_MAX));
+    near_targets(-110.0f / 3.0f, 110, 110.0f / 3.0f, 110.0f / 3.0f);
+
+    fresh();
+    assert(Mecanum_SetBodyVelocity(0.1f, 0, 0, 0.1f, 0.2f, 0.2f));
+    near_targets(9.549296f, 9.549296f, 9.549296f, 9.549296f);
+    assert(!Mecanum_SetBodyVelocity(0.1f, 0, 0, 0, 0.2f, 0.2f));
+    assert(!Mecanum_SetBodyVelocity(0.1f, 0, 0, -1, 0.2f, 0.2f));
+    assert(!Mecanum_SetBodyVelocity(0.1f, 0, 0, 0.1f, 0, 0.2f));
+    assert(!Mecanum_SetBodyVelocity(0.1f, 0, 0, 0.1f, 0.2f, NAN));
+    assert(!Mecanum_SetBodyVelocity(INFINITY, 0, 0, 0.1f, 0.2f, 0.2f));
+    near_targets(9.549296f, 9.549296f, 9.549296f, 9.549296f);
+    fresh();
+    assert(Mecanum_SetBodyVelocity(0, 0, 0.1f, 0.1f, 0.2f, 0.2f));
+    near_targets(-3.8197186f, 3.8197186f, -3.8197186f, 3.8197186f);
+    fresh();
+    assert(Mecanum_SetBodyVelocity(FLT_MAX, FLT_MAX, FLT_MAX,
+                                  FLT_MIN, FLT_MAX, FLT_MAX));
+    for (unsigned i = 0; i < 4; ++i) {
+        assert(isfinite(view(i).target_rpm));
+        assert(fabsf(view(i).target_rpm) <= MOTOR4_MAX_TARGET_RPM);
+    }
+    done("mecanum axis signs, proportional scaling, nonfinite rejection and geometry");
+}
+
+/* Simulate a 5 ms main loop and a 10 ms timer IRQ. Encoder movement is supplied
+ * from target sign only: this checks application lifecycle, not motor physics. */
+static void app_advance_internal(unsigned duration, bool provide_feedback, bool poll)
+{
+    for (unsigned elapsed = 0; elapsed < duration; elapsed += 5) {
+        host_ms += 5;
+        host_irq_phase_ms += 5U;
+        if (host_irq_phase_ms >= 10U) {
+            host_irq_phase_ms = 0U;
+            for (unsigned i = 0; i < 4; ++i) {
+                Motor4Telemetry t = view(i);
+                int delta = 0;
+                if (provide_feedback && t.mode == MOTOR4_MODE_OPEN && t.pwm != 0) {
+                    delta = t.pwm > 0 ? 5 : -5;
+                } else if (provide_feedback && t.mode == MOTOR4_MODE_SPEED && t.target_rpm != 0) {
+                    delta = t.target_rpm > 0 ? 5 : -5;
+                }
+                int raw = delta * enc_sign[i] * drive_sign[i];
+                encoders[i]->Instance->CNT =
+                    (encoders[i]->Instance->CNT + (uint32_t)raw) & 65535U;
+            }
+            Motor4_ControlTick10ms();
+        }
+        if (poll) RobotApp_Poll();
+    }
+}
+static void app_advance(unsigned duration, bool provide_feedback)
+{
+    app_advance_internal(duration, provide_feedback, true);
+}
+static void app_release_and_arm(void)
+{
+    host_button = false;
+    app_advance(300, true);
+}
+static void app_press(void)
+{
+    host_button = true;
+    app_advance(50, true); /* include a control IRQ after command acceptance */
+}
+static unsigned run_messages(void)
+{
+    unsigned count = 0;
+    const char *p = host_uart;
+    while ((p = strstr(p, "RUN ")) != NULL) { ++count; p += 4; }
+    return count;
+}
+#if ROBOT_APP_MODE == 0
+static void app_expected_single(unsigned active)
+{
+    for (unsigned i = 0; i < 4; ++i) {
+        Motor4Telemetry t = view(i);
+        assert(t.target_rpm == 0.0f);
+        assert(t.mode == (i == active ? MOTOR4_MODE_OPEN : MOTOR4_MODE_STOP));
+        assert(t.pwm == (i == active ? ROBOT_APP_TEST_PWM : 0));
+        uint32_t expected_ccr = i == active ?
+            4200U * ROBOT_APP_TEST_PWM / 1000U : 4200U;
+        assert(*host_ccr(&htim1, channels[i]) == expected_ccr);
+        if (i == active) assert_direction(i, 1);
+        else assert(((GPIOC->ODR >> direction_shifts[i]) & 3U) == 0U);
+    }
+}
+#endif
+static void app_expected_initial_targets(void)
+{
+#if ROBOT_APP_MODE == 0
+    app_expected_single(0);
+#elif ROBOT_APP_MODE == 1
+    const float v = ROBOT_APP_START_RPM;
+    near_targets(v, v, v, v);
+#elif ROBOT_APP_MODE == 2
+    const float v = ROBOT_APP_TEST_RPM;
+    near_targets(-v, -v, -v, -v);
+#elif ROBOT_APP_MODE == 3
+    const float v = ROBOT_APP_TEST_RPM;
+    near_targets(-v, v, v, -v);
+#elif ROBOT_APP_MODE == 4
+    const float v = ROBOT_APP_TEST_RPM;
+    near_targets(v, -v, -v, v);
+#elif ROBOT_APP_MODE == 5
+    const float v = ROBOT_APP_TEST_RPM;
+    near_targets(-v, v, -v, v);
+#else
+    const float v = ROBOT_APP_TEST_RPM;
+    near_targets(v, -v, v, -v);
+#endif
+}
+#if ROBOT_APP_MODE == 0
+static void test_robot_app(void)
+{
+    fresh();
+    host_button = true;
+    RobotApp_Init();
+    app_advance(600, false);
+    assert_all_stopped();
+    assert(run_messages() == 0);
+    const char *a_print = strstr(host_uart, "A/FL cnt=");
+    const char *b_print = strstr(host_uart, "B/RL cnt=");
+    const char *c_print = strstr(host_uart, "C/RR cnt=");
+    const char *d_print = strstr(host_uart, "D/FR cnt=");
+    assert(a_print != NULL && b_print != NULL && c_print != NULL && d_print != NULL);
+    assert(a_print < b_print && b_print < c_print && c_print < d_print);
+    app_release_and_arm();
+    host_button = true;
+    app_advance(20, true);
+    assert_all_stopped();
+    app_advance(20, true);
+    app_advance(10, true);
+    app_expected_initial_targets();
+    assert(run_messages() == 1);
+#if ROBOT_APP_MODE == 0
+    assert(strstr(host_uart, "wheel=A/FL open_pwm=") != NULL);
+#endif
+    app_advance(1000, true);
+    for (unsigned i = 0; i < 4; ++i) assert(view(i).fault == 0);
+    host_button = false;
+    app_advance(5, true);
+    assert_all_stopped();
+    assert(strstr(host_uart, "STOP reason=release") != NULL);
+    app_release_and_arm();
+    app_press();
+#if ROBOT_APP_MODE == 0
+    app_expected_single(MOTOR4_RL);
+    assert(strstr(host_uart, "wheel=B/RL open_pwm=") != NULL);
+#else
+    app_expected_initial_targets();
+#endif
+    app_advance(ROBOT_APP_RUN_MS + 100U, true);
+    assert_all_stopped();
+    assert(strstr(host_uart, "STOP reason=timeout") != NULL);
+    unsigned before = run_messages();
+    app_advance(1000, true); /* still holding USER must not auto-restart */
+    assert_all_stopped();
+    assert(run_messages() == before);
+    app_release_and_arm();
+    app_press();
+#if ROBOT_APP_MODE == 0
+    app_expected_single(MOTOR4_RR);
+    assert(strstr(host_uart, "wheel=C/RR open_pwm=") != NULL);
+#else
+    app_expected_initial_targets();
+#endif
+    host_button = false;
+    app_advance(5, true);
+    assert_all_stopped();
+
+    app_release_and_arm();
+    app_press();
+#if ROBOT_APP_MODE == 0
+    app_expected_single(MOTOR4_FR);
+    assert(strstr(host_uart, "wheel=D/FR open_pwm=") != NULL);
+#else
+    app_expected_initial_targets();
+#endif
+    assert(run_messages() == 4);
+    host_button = false;
+    app_advance(5, true);
+    assert_all_stopped();
+
+    fresh();
+    RobotApp_Init();
+    app_release_and_arm();
+    app_press();
+    app_advance(250, false);
+    assert_all_stopped();
+    assert(strstr(host_uart, "STOP reason=motor_fault") != NULL);
+    app_release_and_arm();
+    unsigned fault_runs = run_messages();
+    app_press();
+    assert_all_stopped();
+    assert(run_messages() == fault_runs);
+    assert(strstr(host_uart, "fault_latched_check_wiring_then_reset") != NULL);
+    done("RobotApp held-at-boot, debounce, wheel cycle, deadman/timeout and fault refusal");
+}
+#else
+static void app_expected_running_targets(void)
+{
+#if ROBOT_APP_MODE == 1
+    uint32_t elapsed = (uint32_t)(host_ms - host_run_at);
+    uint32_t ramp_elapsed = elapsed < ROBOT_APP_RAMP_MS ? elapsed : ROBOT_APP_RAMP_MS;
+    float target = ROBOT_APP_START_RPM + (ROBOT_APP_TEST_RPM - ROBOT_APP_START_RPM)
+                 * (float)ramp_elapsed / (float)ROBOT_APP_RAMP_MS;
+    near_targets(target, target, target, target);
+#else
+    app_expected_initial_targets();
+#endif
+}
+static void app_advance_running(unsigned duration)
+{
+    for (unsigned elapsed = 0; elapsed < duration; elapsed += 5U) {
+        unsigned commands_before = host_set_all_calls;
+#if ROBOT_APP_MODE == 1
+        uint32_t age_before = (uint32_t)(host_ms - host_run_at);
+        float target_before = view(0).target_rpm;
+#endif
+        app_advance(5, true);
+        assert((uint32_t)(host_ms - host_run_at) < ROBOT_APP_RUN_MS);
+#if ROBOT_APP_MODE == 1
+        if (host_set_all_calls != commands_before) {
+            assert(host_set_all_calls == commands_before + 1U);
+            app_expected_running_targets(); /* new commands use actual elapsed time */
+        } else {
+            near_targets(target_before, target_before, target_before, target_before);
+        }
+        assert(view(0).target_rpm >= target_before);
+        assert(view(0).target_rpm <= 85.0f);
+        uint32_t age = (uint32_t)(host_ms - host_run_at);
+        if (age < ROBOT_APP_RAMP_MS) {
+            /* A 10ms command cadence may hold the previous value between polls. */
+            float latest = 15.0f + 70.0f * (float)age / 1000.0f;
+            assert(latest - view(0).target_rpm < 0.701f);
+        } else {
+            near_targets(85, 85, 85, 85);
+        }
+        if (age_before >= ROBOT_APP_RAMP_MS) {
+            assert(host_set_all_calls == commands_before); /* no cruise resubmits */
+        }
+#else
+        app_expected_running_targets();
+        assert(host_set_all_calls == commands_before); /* modes 2..6 have no ramp */
+#endif
+    }
+}
+static void assert_no_faults(void)
+{
+    for (unsigned i = 0; i < 4; ++i) assert(view(i).fault == 0);
+}
+static void fresh_app(uint32_t time_base)
+{
+    fresh();
+    host_ms = time_base;
+    RobotApp_Init();
+    app_release_and_arm();
+    assert_all_stopped();
+    assert(strstr(host_uart, "READY mode=click") != NULL);
+    assert(host_delay_events == 0 && host_run_events == 0 && host_set_all_calls == 0);
+}
+static void app_click(void)
+{
+    unsigned before = host_delay_events;
+    app_press();
+    assert_all_stopped(); /* a stable press alone must not start or schedule */
+    assert(host_delay_events == before);
+    host_button = false;
+    app_advance(40, true);
+    assert(host_delay_events == before + 1U);
+    assert_all_stopped();
+}
+static void start_after_delay(void)
+{
+    unsigned before = host_run_events;
+    unsigned commands = host_set_all_calls;
+    uint32_t elapsed = (uint32_t)(host_ms - host_delay_at);
+    assert(elapsed < ROBOT_APP_START_DELAY_MS);
+    app_advance(ROBOT_APP_START_DELAY_MS - elapsed - 5U, true);
+    assert((uint32_t)(host_ms - host_delay_at) == ROBOT_APP_START_DELAY_MS - 5U);
+    assert_all_stopped();
+    assert_no_faults(); /* idle >500ms must not trip the motion watchdog */
+    assert(host_run_events == before && host_set_all_calls == commands);
+    app_advance(5, true);
+    assert((uint32_t)(host_run_at - host_delay_at) == ROBOT_APP_START_DELAY_MS);
+    assert(host_run_events == before + 1U && host_set_all_calls == commands + 1U);
+    app_expected_initial_targets(); /* all four targets visible in the same poll */
+}
+static void test_click_lifecycle(void)
+{
+#if ROBOT_APP_MODE == 1
+    assert(ROBOT_APP_START_RPM == 15.0f && ROBOT_APP_TEST_RPM == 85.0f);
+    assert(ROBOT_APP_RAMP_MS == 1000U);
+#else
+    assert(ROBOT_APP_TEST_RPM == 15.0f);
+#endif
+    fresh_app(0);
+    app_click();
+    start_after_delay();
+    assert(!host_button);
+    app_advance_running(250); /* continue after release without holding USER */
+#if ROBOT_APP_MODE == 1
+    near_targets(32.5f, 32.5f, 32.5f, 32.5f);
+#endif
+    app_advance_running(250);
+#if ROBOT_APP_MODE == 1
+    near_targets(50, 50, 50, 50);
+#endif
+    app_advance_running(495);
+#if ROBOT_APP_MODE == 1
+    assert(view(0).target_rpm < 85.0f);
+#endif
+    app_advance_running(5);
+#if ROBOT_APP_MODE == 1
+    near_targets(85, 85, 85, 85);
+    assert(host_set_all_calls > 1);
+#else
+    assert(host_set_all_calls == 1);
+#endif
+    unsigned cruise_commands = host_set_all_calls;
+    assert(host_run_events == 1);
+    assert(run_messages() == 1);
+    uint32_t elapsed = (uint32_t)(host_ms - host_run_at);
+    app_advance_running(ROBOT_APP_RUN_MS - elapsed - 5U);
+    assert((uint32_t)(host_ms - host_run_at) == ROBOT_APP_RUN_MS - 5U);
+    app_expected_running_targets();
+    assert_no_faults(); /* Poll must keep refreshing the motor watchdog */
+    assert(host_run_events == 1 && host_set_all_calls == cruise_commands);
+    app_advance(5, true);
+    assert_all_stopped();
+    assert(strstr(host_uart, "STOP reason=timeout") != NULL);
+    app_advance(2000, true);
+    assert_all_stopped();
+    assert(host_run_events == 1 && host_set_all_calls == cruise_commands);
+    app_click();
+    start_after_delay();
+    assert(host_run_events == 2 && host_set_all_calls == cruise_commands + 1U);
+    app_advance_running(250); /* stop during acceleration, not only during cruise */
+    unsigned stopped_commands = host_set_all_calls;
+    host_button = true;
+    app_advance(5, true);
+    assert_all_stopped();
+    assert(strstr(host_uart, "STOP reason=user_stop") != NULL);
+    app_advance(2000, true); /* held stop press must never queue a new run */
+    host_button = false;
+    app_advance(2000, true);
+    assert_all_stopped();
+    assert(host_run_events == 2 && host_set_all_calls == stopped_commands && host_delay_events == 2);
+    done("click lifecycle: 1s delay, atomic targets/ramp, 10s from first RUN and press-to-stop");
+}
+static void test_click_debounce_and_cancellation(void)
+{
+    fresh();
+    host_button = true;
+    RobotApp_Init();
+    app_advance(2000, true);
+    assert_all_stopped();
+    assert(host_delay_events == 0 && host_run_events == 0);
+    host_button = false;
+    app_advance(1500, true); /* boot-held button release is not a click */
+    assert_all_stopped();
+    assert(host_delay_events == 0 && host_run_events == 0);
+
+    for (unsigned bounce = 0; bounce < 3; ++bounce) {
+        host_button = true; app_advance(15, true);
+        host_button = false; app_advance(10, true);
+    }
+    app_advance(1500, true);
+    assert_all_stopped();
+    assert(host_delay_events == 0 && host_run_events == 0);
+
+    host_button = true;
+    app_advance(2000, true); /* even a long press waits for a stable release */
+    assert_all_stopped();
+    assert(host_delay_events == 0 && host_run_events == 0);
+    host_button = false; app_advance(10, true);
+    assert(host_delay_events == 0);
+    host_button = true; app_advance(1500, true); /* release bounce */
+    assert_all_stopped();
+    assert(host_delay_events == 0 && host_run_events == 0);
+    host_button = false; app_advance(30, true);
+    assert(host_delay_events == 0);
+    app_advance(10, true);
+    assert(host_delay_events == 1 && host_run_events == 0);
+    app_advance(300, true);
+    host_button = true; app_advance(5, true); /* cancel before debounce */
+    assert_all_stopped();
+    assert(strstr(host_uart, "STOP reason=delay_cancelled") != NULL);
+    app_advance(2000, true);
+    host_button = false; app_advance(2000, true);
+    assert_all_stopped();
+    assert(host_delay_events == 1 && host_run_events == 0 && host_set_all_calls == 0);
+    app_click();
+    start_after_delay();
+    assert(host_run_events == 1 && host_set_all_calls == 1);
+    done("click debounce: boot-held, press/release bounce, long hold and delay cancellation");
+}
+static void test_click_faults_and_watchdog(void)
+{
+    fresh_app(0);
+    app_click();
+    Host_InjectFault(MOTOR4_FL, MOTOR4_FAULT_NO_FEEDBACK);
+    app_advance(5, true);
+    assert_all_stopped();
+    app_advance(2000, true);
+    assert(host_run_events == 0 && host_set_all_calls == 0);
+    assert(Motor4_ClearFaults());
+    app_advance(2000, true);
+    assert(host_run_events == 0 && host_set_all_calls == 0); /* no stale pending */
+    app_click();
+    start_after_delay();
+    app_advance_running(250);
+    unsigned fault_commands = host_set_all_calls;
+    Host_InjectFault(MOTOR4_FR, MOTOR4_FAULT_WRONG_DIRECTION);
+    app_advance(5, true);
+    assert_all_stopped();
+    app_advance(2000, true);
+    assert(host_run_events == 1 && host_set_all_calls == fault_commands);
+    assert(Motor4_ClearFaults());
+    app_advance(2000, true);
+    assert_all_stopped();
+    assert(host_run_events == 1 && host_set_all_calls == fault_commands);
+
+    fresh_app(0);
+    app_click();
+    start_after_delay();
+    app_advance_running(100);
+    unsigned watchdog_commands = host_set_all_calls;
+    app_advance_internal(MOTOR4_WATCHDOG_MS + 10U, true, false);
+    assert_all_stopped();
+    assert(view(0).fault & MOTOR4_FAULT_WATCHDOG);
+    RobotApp_Poll();
+    app_advance(2000, true);
+    assert(host_run_events == 1 && host_set_all_calls == watchdog_commands);
+    assert(Motor4_ClearFaults());
+    app_advance(2000, true);
+    assert_all_stopped();
+    assert(host_run_events == 1 && host_set_all_calls == watchdog_commands);
+
+    fresh_app(0);
+    app_click();
+    start_after_delay();
+    app_advance(250, false); /* repeated ramp SetAll must not clear no-feedback guard */
+    assert_all_stopped();
+    assert(view(0).fault & MOTOR4_FAULT_NO_FEEDBACK);
+    unsigned no_feedback_commands = host_set_all_calls;
+    app_advance(2000, true);
+    assert(host_run_events == 1 && host_set_all_calls == no_feedback_commands);
+    assert(Motor4_ClearFaults());
+    app_advance(2000, true);
+    assert_all_stopped();
+    assert(host_run_events == 1 && host_set_all_calls == no_feedback_commands);
+    done("click faults/watchdog cancel pending and motion without latent restart");
+}
+static void test_click_wrap_and_motion_guard(void)
+{
+    fresh_app(UINT32_MAX - 900U);
+    app_click();
+    start_after_delay(); /* delay crosses HAL_GetTick wrap */
+    uint32_t elapsed = (uint32_t)(host_ms - host_run_at);
+    app_advance_running(ROBOT_APP_RUN_MS - elapsed - 5U);
+    app_expected_running_targets();
+    unsigned completed_commands = host_set_all_calls;
+    app_advance(5, true);
+    assert_all_stopped();
+    assert_no_faults();
+    assert(host_run_events == 1 && host_set_all_calls == completed_commands);
+
+    fresh_app(UINT32_MAX - 2500U);
+    app_click();
+    start_after_delay(); /* running interval crosses HAL_GetTick wrap */
+    app_advance_running(ROBOT_APP_RUN_MS - 5U);
+    app_expected_running_targets();
+    app_advance(5, true);
+    assert_all_stopped();
+    assert_no_faults();
+
+#if ROBOT_APP_MODE == 1
+    fresh_app(UINT32_MAX - 1800U);
+    app_click();
+    start_after_delay(); /* this 1s ramp itself crosses HAL_GetTick wrap */
+    unsigned before_gap = host_set_all_calls;
+    app_advance_internal(250, true, false);
+    app_expected_initial_targets(); /* target cannot advance without a main-loop poll */
+    RobotApp_Poll();
+    assert(host_set_all_calls == before_gap + 1U);
+    near_targets(32.5f, 32.5f, 32.5f, 32.5f); /* actual elapsed, not loop count */
+    app_advance_running(750);
+    near_targets(85, 85, 85, 85);
+    uint32_t ramp_finished_at = host_ms;
+    unsigned ramp_commands = host_set_all_calls;
+    app_advance_running(500);
+    assert(host_set_all_calls == ramp_commands);
+    assert((uint32_t)(ramp_finished_at - host_run_at) == 1000U);
+    host_button = true;
+    app_advance(5, true);
+    assert_all_stopped();
+#endif
+
+    fresh_app(0);
+    app_click();
+    uint32_t left = ROBOT_APP_START_DELAY_MS - (uint32_t)(host_ms - host_delay_at);
+    app_advance(left - 5U, true);
+    tick(1, 0, 0, 0, false); /* external wheel movement at the start boundary */
+    RobotApp_Poll();
+    assert_all_stopped();
+    assert(host_run_events == 0 && host_set_all_calls == 0);
+    assert(strstr(host_uart, "STOP reason=wheels_not_still") != NULL);
+    app_advance(2000, true);
+    assert_all_stopped();
+    assert(host_run_events == 0 && host_set_all_calls == 0);
+    done("click uint32 timer wrap and pending cancellation when wheels are moving");
+}
+static void test_robot_app(void)
+{
+    test_click_lifecycle();
+    test_click_debounce_and_cancellation();
+    test_click_faults_and_watchdog();
+    test_click_wrap_and_motion_guard();
+}
+#endif
+
+int main(void)
+{
+    test_calibrated_configuration();
+    test_init_and_failure_cleanup();
+    test_encoder_mapping_and_wrap();
+    test_pwm_and_shared_stby();
+    test_transactions_and_reversal();
+    test_pi_and_antiwindup();
+    test_faults_and_watchdog();
+    test_critical_sections_and_getters();
+    test_mecanum();
+    test_robot_app();
+    printf("%u groups passed (drive signs %d,%d,%d,%d).\n", passed,
+           drive_sign[0], drive_sign[1], drive_sign[2], drive_sign[3]);
+    return 0;
+}
