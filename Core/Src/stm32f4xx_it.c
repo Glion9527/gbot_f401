@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "usart.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -184,7 +185,9 @@ void PendSV_Handler(void)
 void SysTick_Handler(void)
 {
   /* USER CODE BEGIN SysTick_IRQn 0 */
-
+  /* HAL 默认每 1ms 进入一次 SysTick，下面的 HAL_IncTick 累加毫秒计数。
+   * HAL_GetTick 读取该计数；应用用它判断消抖、启动延迟和运行是否超时。
+   * 电机的固定 10ms 控制节拍来自 TIM9，不在这里直接执行。 */
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
@@ -205,13 +208,30 @@ void SysTick_Handler(void)
 void TIM1_BRK_TIM9_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM1_BRK_TIM9_IRQn 0 */
-
+  /* TIM1 Break 和 TIM9 共用中断入口，HAL 分别检查各自的标志位。
+   * TIM9 更新事件 -> HAL_TIM_IRQHandler(&htim9)
+   * -> main.c 的 HAL_TIM_PeriodElapsedCallback -> Motor4_ControlTick10ms。
+   * main.c 会判断实例是否为 TIM9，避免把其他定时器事件当作调速节拍。
+   * 该路径只做测速与控制，不在中断中打印串口或等待按键。 */
   /* USER CODE END TIM1_BRK_TIM9_IRQn 0 */
   HAL_TIM_IRQHandler(&htim1);
   HAL_TIM_IRQHandler(&htim9);
   /* USER CODE BEGIN TIM1_BRK_TIM9_IRQn 1 */
 
   /* USER CODE END TIM1_BRK_TIM9_IRQn 1 */
+}
+
+/**
+  * @brief This function handles USART2 global interrupt.
+  */
+void USART2_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART2_IRQn 0 */
+  /* 只接收字节和处理UART错误，命令解析留在主循环。 */
+  /* USER CODE END USART2_IRQn 0 */
+  HAL_UART_IRQHandler(&huart2);
+  /* USER CODE BEGIN USART2_IRQn 1 */
+  /* USER CODE END USART2_IRQn 1 */
 }
 
 /* USER CODE BEGIN 1 */

@@ -1,0 +1,535 @@
+#include "motor4.h"
+#include "remote_control.h"
+#include "tim.h"
+#include "usart.h"
+#include <assert.h>
+#include <inttypes.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* Only the HAL is simulated; parsing, sessions, timeouts, kinematics and PI
+ * below are linked from the actual Core sources in a temporary directory. */
+GPIO_TypeDef host_gpio_a, host_gpio_b, host_gpio_c;
+TIM_TypeDef host_tim1, host_tim2, host_tim3, host_tim4, host_tim5, host_tim9;
+TIM_HandleTypeDef htim1 = {TIM1}, htim2 = {TIM2}, htim3 = {TIM3};
+TIM_HandleTypeDef htim4 = {TIM4}, htim5 = {TIM5}, htim9 = {TIM9};
+USART_TypeDef host_usart2;
+UART_HandleTypeDef huart2 = {USART2, 0};
+uint32_t host_primask, host_ms;
+void Host_EmulateMCUReset(void);
+void Host_InjectFault(unsigned source, uint8_t fault);
+void Host_SetPosition(unsigned wheel, int64_t position);
+static bool button;
+static uint8_t *rx_destination;
+static unsigned irq_phase, passed, rx_calls;
+static bool rx_failure;
+static bool tx_failure;
+static double fractional_counts[4];
+static char output[131072];
+static size_t output_length;
+static TIM_HandleTypeDef *const encoders[4] = {&htim3, &htim5, &htim2, &htim4};
+static const int encoder_signs[4] = {
+    MOTOR4_FL_ENCODER_SIGN*MOTOR4_FL_DRIVE_SIGN,
+    MOTOR4_FR_ENCODER_SIGN*MOTOR4_FR_DRIVE_SIGN,
+    MOTOR4_RL_ENCODER_SIGN*MOTOR4_RL_DRIVE_SIGN,
+    MOTOR4_RR_ENCODER_SIGN*MOTOR4_RR_DRIVE_SIGN
+};
+
+uint32_t HAL_GetTick(void) { return host_ms; }
+void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pins, GPIO_PinState state)
+{
+    if (state == GPIO_PIN_SET) port->ODR |= pins;
+    else port->ODR &= ~(uint32_t)pins;
+}
+GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pins)
+{
+    if (port == B1_GPIO_Port && pins == B1_Pin)
+        return button ? GPIO_PIN_RESET : GPIO_PIN_SET;
+    return (port->ODR & pins) != 0 ? GPIO_PIN_SET : GPIO_PIN_RESET;
+}
+HAL_StatusTypeDef HAL_TIM_PWM_Start(TIM_HandleTypeDef *h, uint32_t channel)
+{
+    h->Instance->pwm_started |= 1U << (channel/4U);
+    return HAL_OK;
+}
+HAL_StatusTypeDef HAL_TIM_PWM_Stop(TIM_HandleTypeDef *h, uint32_t channel)
+{
+    h->Instance->pwm_started &= ~(1U << (channel/4U));
+    return HAL_OK;
+}
+HAL_StatusTypeDef HAL_TIM_Encoder_Start(TIM_HandleTypeDef *h, uint32_t channel)
+{
+    h->Instance->encoder_started = channel;
+    return HAL_OK;
+}
+HAL_StatusTypeDef HAL_TIM_Encoder_Stop(TIM_HandleTypeDef *h, uint32_t channel)
+{
+    (void)channel;
+    h->Instance->encoder_started = 0;
+    return HAL_OK;
+}
+HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *h, uint8_t *data,
+                                   uint16_t length, uint32_t timeout)
+{
+    (void)h; (void)timeout;
+    assert(host_primask == 0); /* No blocking UART transmit inside a critical section. */
+    if (tx_failure) return HAL_TIMEOUT;
+    assert(output_length + length + 1U < sizeof(output));
+    memcpy(output+output_length, data, length);
+    output_length += length;
+    output[output_length] = 0;
+    return HAL_OK;
+}
+HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *h, uint8_t *data,
+                                    uint16_t length)
+{
+    assert(h == &huart2 && length == 1U);
+    ++rx_calls;
+    if (rx_failure) return HAL_ERROR;
+    rx_destination = data;
+    return HAL_OK;
+}
+HAL_StatusTypeDef HAL_UART_AbortReceive_IT(UART_HandleTypeDef *h)
+{
+    assert(h == &huart2);
+    rx_destination = NULL;
+    return HAL_OK;
+}
+
+static void clear_output(void) { output_length = 0; output[0] = 0; }
+static Motor4Telemetry view(unsigned i)
+{
+    Motor4Telemetry t;
+    assert(Motor4_GetTelemetry((Motor4Id)i, &t));
+    return t;
+}
+static void assert_stopped(void)
+{
+    assert((GPIOA->ODR & GPIO_PIN_4) == 0);
+    for (unsigned i=0; i<4; ++i) {
+        Motor4Telemetry t=view(i);
+        assert(t.mode == MOTOR4_MODE_STOP && t.target_rpm == 0.0f && t.pwm == 0);
+    }
+}
+static void assert_no_faults(void)
+{
+    for (unsigned i=0; i<4; ++i) assert(view(i).fault == 0);
+}
+static void fresh_at(uint32_t start)
+{
+    Host_EmulateMCUReset();
+    memset(&host_gpio_a,0,sizeof(host_gpio_a));
+    memset(&host_gpio_b,0,sizeof(host_gpio_b));
+    memset(&host_gpio_c,0,sizeof(host_gpio_c));
+    memset(&host_tim1,0,sizeof(host_tim1));
+    memset(&host_tim2,0,sizeof(host_tim2));
+    memset(&host_tim3,0,sizeof(host_tim3));
+    memset(&host_tim4,0,sizeof(host_tim4));
+    memset(&host_tim5,0,sizeof(host_tim5));
+    memset(&host_tim9,0,sizeof(host_tim9));
+    memset(fractional_counts,0,sizeof(fractional_counts));
+    host_tim1.ARR=4199;
+    for (unsigned i=0;i<4;++i) encoders[i]->Instance->ARR=65535;
+    host_primask=0; host_ms=start; irq_phase=0; rx_calls=0;
+    button=false; rx_failure=false; tx_failure=false; rx_destination=NULL; huart2.ErrorCode=0;
+    clear_output();
+    assert(Motor4_Init()==HAL_OK);
+    assert(RemoteControl_Init()==HAL_OK);
+    assert(rx_destination!=NULL);
+    assert_stopped();
+}
+static void fresh(void) { fresh_at(0); }
+static void advance(unsigned milliseconds, bool poll, bool feedback)
+{
+    for (unsigned m=0;m<milliseconds;++m) {
+        ++host_ms;
+        if (++irq_phase==10U) {
+            irq_phase=0;
+            if (feedback) {
+                for (unsigned i=0;i<4;++i) {
+                    fractional_counts[i]+=(double)view(i).target_rpm*3960.0/6000.0;
+                    int logical=(int)fractional_counts[i];
+                    fractional_counts[i]-=(double)logical;
+                    int raw=logical*encoder_signs[i];
+                    encoders[i]->Instance->CNT=(encoders[i]->Instance->CNT+(uint32_t)raw)&65535U;
+                }
+            }
+            RemoteControl_Tick10ms();
+            Motor4_ControlTick10ms();
+            assert(host_primask==0);
+        }
+        if (poll) RemoteControl_Poll();
+    }
+}
+static uint16_t reference_crc(const char *payload, size_t length)
+{
+    uint16_t crc=0xffff;
+    for (size_t i=0;i<length;++i) {
+        crc^=(uint16_t)((uint16_t)(uint8_t)payload[i]<<8);
+        for (unsigned b=0;b<8;++b)
+            crc=(uint16_t)((crc&0x8000U)!=0U ? ((uint32_t)crc<<1)^0x1021U : (uint32_t)crc<<1);
+    }
+    return crc;
+}
+static size_t make_frame(char *out,size_t capacity,const char *payload)
+{
+    int size=snprintf(out,capacity,"@%s*%04X\n",payload,(unsigned)reference_crc(payload,strlen(payload)));
+    assert(size>0 && (size_t)size<capacity);
+    return (size_t)size;
+}
+static void receive_bytes(const char *text,size_t length)
+{
+    for (size_t i=0;i<length;++i) {
+        assert(rx_destination!=NULL);
+        *rx_destination=(uint8_t)text[i];
+        rx_destination=NULL;
+        RemoteControl_UART_RxCplt(&huart2);
+    }
+}
+static void send(const char *payload)
+{
+    char frame[512];
+    size_t length=make_frame(frame,sizeof(frame),payload);
+    receive_bytes(frame,length);
+    RemoteControl_Poll();
+}
+static void expect_ack(uint32_t session,uint32_t seq,const char *result)
+{
+    char expected[128];
+    (void)snprintf(expected,sizeof(expected),"@ACK,%" PRIu32 ",%" PRIu32 ",%s*",session,seq,result);
+    if (strstr(output,expected)==NULL) {
+        fprintf(stderr,"Missing ACK: %s\nOutput:\n%s\n",expected,output);
+        assert(false);
+    }
+}
+static void connect_and_arm(void)
+{
+    send("H,17,0"); expect_ack(17,0,"OK");
+    advance(260,true,false);
+    clear_output(); send("A,17,1"); expect_ack(17,1,"OK");
+}
+static void start_forward(void)
+{
+    fresh(); connect_and_arm();
+    clear_output(); send("V,17,2,50,0,0"); expect_ack(17,2,"OK");
+    advance(10,true,true);
+    for (unsigned i=0;i<4;++i) assert(view(i).pwm>0);
+}
+static void done(const char *name) { ++passed; printf("PASS %s\n",name); }
+
+static void test_initial_and_arm_guard(void)
+{
+    fresh();
+    send("V,17,1,50,0,0"); assert_stopped();
+    send("H,17,0"); expect_ack(17,0,"OK");
+    clear_output(); send("A,17,1"); expect_ack(17,1,"BUSY"); assert_stopped();
+    advance(260,true,false);
+    clear_output(); send("A,17,1");
+    assert(strstr(output,",1,OK*")==NULL); /* BUSY still consumes its sequence. */
+    clear_output(); send("A,17,2"); expect_ack(17,2,"OK");
+    send("V,17,3,0,0,0"); expect_ack(17,3,"OK"); assert_stopped();
+    button=true; advance(10,false,false);
+    clear_output(); send("A,17,4"); assert_stopped();
+    assert(strstr(output,",4,OK*")==NULL);
+    done("boot is stopped; explicit arm requires fresh sequence, released button and 250ms quiet");
+}
+
+static void test_crc_fragmentation_and_frames(void)
+{
+    assert(reference_crc("123456789",9)==0x29b1U);
+    fresh(); connect_and_arm(); clear_output();
+    char frame[128]; size_t length=make_frame(frame,sizeof(frame),"V,17,2,50,0,0");
+    receive_bytes(frame,length/2); RemoteControl_Poll(); assert_stopped();
+    receive_bytes(frame+length/2,length-length/2); RemoteControl_Poll();
+    expect_ack(17,2,"OK");
+    char frames[256], first[128], second[128];
+    (void)make_frame(first,sizeof(first),"V,17,3,0,0,0");
+    (void)make_frame(second,sizeof(second),"S,17,4");
+    (void)snprintf(frames,sizeof(frames),"%s%s",first,second);
+    receive_bytes(frames,strlen(frames)); RemoteControl_Poll();
+    expect_ack(17,3,"OK"); expect_ack(17,4,"OK"); assert_stopped();
+
+    fresh(); connect_and_arm();
+    length=make_frame(frame,sizeof(frame),"V,17,2,50,0,0");
+    frame[length-1]='\r'; frame[length]='\n';
+    receive_bytes(frame,length+1); RemoteControl_Poll(); expect_ack(17,2,"OK");
+
+    start_forward(); clear_output();
+    length=make_frame(frame,sizeof(frame),"V,17,3,70,0,0");
+    frame[length-2]=frame[length-2]=='0'?'1':'0';
+    receive_bytes(frame,length); RemoteControl_Poll(); advance(10,false,true);
+    assert_stopped();
+    send("V,17,4,50,0,0"); expect_ack(17,4,"DISARMED");
+    done("independent CRC known vector, split/concatenated/CRLF frames and corrupt-frame stop");
+}
+
+static void test_strict_numbers_and_limits(void)
+{
+    static const char *const bad[] = {
+        "V,17,3,151,0,0", "V,17,3,0,-151,0", "V,17,3,0,0,601",
+        "V,17,3,nan,0,0", "V,17,3,1.0,0,0", "V,17,3, 1,0,0",
+        "V,17,3,+1,0,0", "V,17,3,1x,0,0", "V,17,3,1,0,0,9",
+        "V,17,3,1,0", "V,17,3,999999999999999999999,0,0",
+        "V,17,4294967296,1,0,0", "V,17,-1,1,0,0", "V,,3,1,0,0"
+    };
+    for (size_t b=0;b<sizeof(bad)/sizeof(bad[0]);++b) {
+        start_forward(); clear_output(); send(bad[b]); advance(10,false,true);
+        assert_stopped();
+        assert(strstr(output,",3,OK*")==NULL);
+        assert_no_faults();
+    }
+    fresh(); connect_and_arm();
+    send("V,17,2,-150,0,-600"); expect_ack(17,2,"OK");
+    for (unsigned i=0;i<4;++i) assert(fabsf(view(i).target_rpm)<=60.001f);
+    done("strict decimal grammar and numeric/field bounds reject malformed motor commands");
+}
+
+static void test_kinematics_and_cap(void)
+{
+    const int inputs[][3]={{50,0,0},{0,50,0},{0,0,250},{150,150,600}};
+    const double factor=60.0/(2.0*3.14159265358979323846*0.04);
+    for (unsigned test=0;test<4;++test) {
+        fresh(); connect_and_arm();
+        char payload[128];
+        (void)snprintf(payload,sizeof(payload),"V,17,2,%d,%d,%d",inputs[test][0],inputs[test][1],inputs[test][2]);
+        send(payload); expect_ack(17,2,"OK");
+        double x=(double)inputs[test][0]/1000.0;
+        double y=(double)inputs[test][1]/1000.0;
+        double z=(double)inputs[test][2]/1000.0*0.2025;
+        double wanted[4]={(x-y-z)*factor,(x+y+z)*factor,(x+y-z)*factor,(x-y+z)*factor};
+        double peak=0;
+        for (unsigned i=0;i<4;++i) if(fabs(wanted[i])>peak) peak=fabs(wanted[i]);
+        double scale=peak>60.0?60.0/peak:1.0;
+        for (unsigned i=0;i<4;++i) {
+            assert(fabs((double)view(i).target_rpm-wanted[i]*scale)<0.002);
+            assert(fabsf(view(i).target_rpm)<=60.001f);
+        }
+        advance(10,true,true);
+        /* Physical A/B/C/D outputs correspond to FL/RL/RR/FR. */
+        const unsigned physical_to_logical[4]={0,2,3,1};
+        for (unsigned physical=0;physical<4;++physical) {
+            unsigned logical=physical_to_logical[physical];
+            uint32_t pair=(GPIOC->ODR>>(2U*physical))&3U;
+            int hardware_sign=view(logical).pwm>0?1:-1;
+            static const int drives[4]={MOTOR4_FL_DRIVE_SIGN,MOTOR4_FR_DRIVE_SIGN,MOTOR4_RL_DRIVE_SIGN,MOTOR4_RR_DRIVE_SIGN};
+            if (view(logical).pwm!=0) assert(pair==(hardware_sign*drives[logical]>0?1U:2U));
+        }
+    }
+    done("body units and X-mecanum geometry, FL/FR/RL/RR mapping and equal 60RPM cap");
+}
+
+static void test_sequence_and_session(void)
+{
+    start_forward(); clear_output();
+    send("V,99,3,100,0,0");
+    assert(strstr(output,",3,OK*")==NULL);
+    clear_output(); send("V,17,2,100,0,0");
+    assert(strstr(output,",2,OK*")==NULL);
+    send("H,99,0"); expect_ack(99,0,"OK"); assert_stopped();
+    clear_output(); send("V,17,100,50,0,0"); assert_stopped();
+    send("V,99,1,50,0,0"); expect_ack(99,1,"DISARMED");
+    advance(260,true,false);
+    send("A,99,2"); expect_ack(99,2,"OK");
+
+    fresh(); send("H,17,0"); advance(260,true,false);
+    send("A,17,2147483647"); expect_ack(17,2147483647U,"OK");
+    send("V,17,4294967294,50,0,0"); expect_ack(17,4294967294U,"OK");
+    send("V,17,4294967295,50,0,0"); expect_ack(17,4294967295U,"OK");
+    clear_output(); send("V,17,0,50,0,0"); expect_ack(17,0,"OK");
+    clear_output(); send("V,17,4294967295,80,0,0");
+    assert(strstr(output,",4294967295,OK*")==NULL);
+    done("new session disarms; mismatched/replayed commands cannot move; uint32 sequence wrap works");
+}
+
+static void test_tick_timeout_and_no_stale_rearm(void)
+{
+    start_forward();
+    advance(280,false,true); /* 290ms since V; main loop is deliberately stalled. */
+    assert(view(0).target_rpm>0);
+    advance(10,false,true); assert_stopped(); assert_no_faults();
+    clear_output(); send("V,17,3,50,0,0"); expect_ack(17,3,"DISARMED");
+
+    start_forward(); advance(190,true,true);
+    clear_output(); send("A,17,3");
+    advance(110,false,true); assert_stopped(); /* A is not a V heartbeat. */
+
+    start_forward();
+    char queued[256], first[128], second[128];
+    (void)make_frame(first,sizeof(first),"A,17,3");
+    (void)make_frame(second,sizeof(second),"V,17,4,50,0,0");
+    (void)snprintf(queued,sizeof(queued),"%s%s",first,second);
+    receive_bytes(queued,strlen(queued));
+    advance(350,false,true); assert_stopped();
+    RemoteControl_Poll(); assert_stopped();
+    clear_output(); send("V,17,5,50,0,0"); expect_ack(17,5,"DISARMED");
+
+    start_forward();
+    size_t length=make_frame(first,sizeof(first),"A,17,3");
+    receive_bytes(first,length/2); RemoteControl_Poll();
+    advance(350,false,true);
+    receive_bytes(first+length/2,length-length/2); RemoteControl_Poll();
+    assert_stopped();
+    clear_output(); send("V,17,4,50,0,0"); expect_ack(17,4,"DISARMED");
+    done("300ms IRQ timeout works without Poll; A, queued commands and partial frames cannot revive motion");
+}
+
+static void test_zero_stop_button_and_fault(void)
+{
+    start_forward(); clear_output();
+    send("V,17,3,0,0,0"); expect_ack(17,3,"OK"); assert_stopped();
+    send("V,17,4,50,0,0"); expect_ack(17,4,"OK");
+    send("S,17,5"); expect_ack(17,5,"OK"); assert_stopped();
+    send("V,17,6,50,0,0"); expect_ack(17,6,"DISARMED");
+
+    start_forward(); button=true; advance(10,false,true); assert_stopped();
+    button=false; advance(300,true,false);
+    clear_output(); send("V,17,3,50,0,0"); expect_ack(17,3,"DISARMED");
+
+    start_forward(); Host_InjectFault(MOTOR4_RR,MOTOR4_FAULT_WRONG_DIRECTION);
+    advance(10,false,true); assert_stopped(); advance(300,true,false);
+    assert(view(MOTOR4_RR).fault==MOTOR4_FAULT_WRONG_DIRECTION);
+    clear_output(); send("A,17,3"); expect_ack(17,3,"FAULT"); assert_stopped();
+    done("zero V retains arm, S disarms, local USER/fault stops and faults stay latched");
+}
+
+static void test_reversal_and_new_arm(void)
+{
+    start_forward(); clear_output();
+    send("V,17,3,-50,0,0"); expect_ack(17,3,"REJECTED"); assert_stopped();
+    advance(300,true,false);
+    send("V,17,4,-50,0,0"); expect_ack(17,4,"DISARMED"); assert_stopped();
+    send("A,17,5"); expect_ack(17,5,"OK");
+    send("V,17,6,-50,0,0"); expect_ack(17,6,"OK");
+    advance(10,true,true);
+    for (unsigned i=0;i<4;++i) assert(view(i).pwm<0);
+    done("reversal rejection stops and disarms, no delayed automatic reversal, explicit rearm after quiet");
+}
+
+static void test_overflow_uart_and_recovery(void)
+{
+    start_forward(); char huge[2048]; memset(huge,'x',sizeof(huge));
+    receive_bytes(huge,sizeof(huge)); advance(10,false,true); assert_stopped();
+    receive_bytes("\n",1); RemoteControl_Poll();
+    send("H,18,0"); advance(300,true,false); clear_output();
+    send("A,18,1"); expect_ack(18,1,"OK");
+    send("V,18,2,50,0,0"); expect_ack(18,2,"OK");
+
+    start_forward();
+    char overlong[180]; memset(overlong,'x',sizeof(overlong)); overlong[sizeof(overlong)-1]='\n';
+    receive_bytes(overlong,sizeof(overlong)); RemoteControl_Poll(); advance(10,false,true); assert_stopped();
+
+    start_forward(); huart2.ErrorCode=HAL_UART_ERROR_ORE;
+    RemoteControl_UART_Error(&huart2); advance(10,false,true); assert_stopped();
+    assert(rx_destination!=NULL);
+    clear_output(); send("V,17,3,50,0,0"); expect_ack(17,3,"DISARMED");
+    done("RX ring/line overflow and UART error stop; RX can recover without automatic motion");
+}
+
+static void test_uart_failures_and_stale_arrival(void)
+{
+    start_forward(); rx_failure=true;
+    huart2.ErrorCode=HAL_UART_ERROR_ORE;
+    RemoteControl_UART_Error(&huart2);
+    assert_stopped();
+    assert(rx_destination==NULL);
+    advance(350,true,false); assert_stopped();
+    /* An RX start failure is reported to main instead of silently enabling an
+     * application that cannot receive a stop command. */
+    assert(RemoteControl_Init()==HAL_ERROR); assert_stopped();
+
+    start_forward(); tx_failure=true;
+    send("V,17,3,70,0,0"); /* UART ACK transmission fails after command parsing. */
+    assert_stopped(); tx_failure=false;
+    send("V,17,4,50,0,0"); expect_ack(17,4,"DISARMED");
+
+    fresh(); send("H,17,0"); advance(260,true,false);
+    char frame[128]; size_t length=make_frame(frame,sizeof(frame),"A,17,1");
+    receive_bytes(frame,length); /* complete frame waits in IRQ queue, still disarmed */
+    advance(350,false,false); RemoteControl_Poll();
+    clear_output(); send("V,17,2,50,0,0"); expect_ack(17,2,"DISARMED");
+    done("RX startup/rearm and TX failure leave stopped; queued stale ARM is rejected by arrival age");
+}
+
+static void test_arm_motion_guard_and_duplicate_freshness(void)
+{
+    fresh(); send("H,17,0"); advance(240,true,false);
+    encoders[0]->Instance->CNT=1;
+    advance(20,true,false);
+    clear_output(); send("A,17,1"); expect_ack(17,1,"BUSY");
+    advance(260,true,false);
+    clear_output(); send("A,17,2"); expect_ack(17,2,"OK");
+    send("V,17,3,50,0,0");
+    advance(200,true,true);
+    for (unsigned repeated=0;repeated<5;++repeated) send("V,17,3,80,0,0");
+    /* Replayed serial packets do not renew the device-local command lease. */
+    advance(100,false,true); assert_stopped(); assert_no_faults();
+    done("arm needs a new 250ms quiet interval after encoder motion; repeated V cannot feed timeout");
+}
+
+static void test_telemetry_and_clock_wrap(void)
+{
+    fresh(); connect_and_arm(); clear_output();
+    const int64_t positions[4]={INT64_C(3000000001),-INT64_C(4000000002),INT64_C(5000000003),-INT64_C(6000000004)};
+    for (unsigned i=0;i<4;++i) Host_SetPosition(i,positions[i]);
+    advance(100,true,false);
+    assert(strstr(output,",3000000001,-4000000002,5000000003,-6000000004,")!=NULL);
+    for (char *line=output; *line!=0;) {
+        char *newline=strchr(line,'\n'); assert(newline!=NULL);
+        if (*line=='@') {
+            char *star=memchr(line,'*',(size_t)(newline-line)); assert(star!=NULL);
+            unsigned crc=0; assert(sscanf(star+1,"%4X",&crc)==1);
+            assert(reference_crc(line+1,(size_t)(star-line-1))==(uint16_t)crc);
+            if (line[1]=='T') {
+                unsigned commas=0;
+                for (char *c=line;c<star;++c) if(*c==',') ++commas;
+                assert(commas==21U);
+            }
+        }
+        line=newline+1;
+    }
+    Host_SetPosition(0,INT64_MIN);
+    Host_SetPosition(1,INT64_MAX);
+    clear_output(); advance(100,true,false);
+    assert(strstr(output,",-9223372036854775808,9223372036854775807,")!=NULL);
+    fresh_at(UINT32_MAX-400U); connect_and_arm(); send("V,17,2,50,0,0");
+    advance(290,false,true); assert(view(0).target_rpm>0);
+    advance(10,false,true); assert_stopped(); assert_no_faults();
+    done("telemetry has valid CRC, full-width 64-bit counts and wheel field order; timeout spans clock wrap");
+}
+
+static void emit_fixture_if_requested(void)
+{
+    const char *path=getenv("REMOTE_CONTROL_FIXTURE");
+    if (path==NULL) return;
+    fresh(); connect_and_arm();
+    send("V,17,2,50,0,0"); advance(100,true,true);
+    Host_SetPosition(0,INT64_MIN);
+    Host_SetPosition(1,INT64_MAX);
+    send("V,17,3,0,0,0"); advance(100,true,false);
+    send("S,17,4");
+    FILE *file=fopen(path,"wb"); assert(file!=NULL);
+    assert(fwrite(output,1,output_length,file)==output_length);
+    assert(fclose(file)==0);
+    puts("Saved actual firmware ACK/T fixture.");
+}
+
+int main(void)
+{
+    test_initial_and_arm_guard();
+    test_crc_fragmentation_and_frames();
+    test_strict_numbers_and_limits();
+    test_kinematics_and_cap();
+    test_sequence_and_session();
+    test_tick_timeout_and_no_stale_rearm();
+    test_zero_stop_button_and_fault();
+    test_reversal_and_new_arm();
+    test_overflow_uart_and_recovery();
+    test_uart_failures_and_stale_arrival();
+    test_arm_motion_guard_and_duplicate_freshness();
+    test_telemetry_and_clock_wrap();
+    emit_fixture_if_requested();
+    printf("%u remote-control groups passed.\n",passed);
+    return 0;
+}

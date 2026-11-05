@@ -1,0 +1,17 @@
+#ifndef HOST_REMOTE_USART_H
+#define HOST_REMOTE_USART_H
+#include "main.h"
+typedef struct { uint32_t unused; } USART_TypeDef;
+extern USART_TypeDef host_usart2;
+#define USART2 (&host_usart2)
+typedef struct { USART_TypeDef *Instance; uint32_t ErrorCode; } UART_HandleTypeDef;
+extern UART_HandleTypeDef huart2;
+HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *h, uint8_t *data,
+                                   uint16_t size, uint32_t timeout);
+HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *h, uint8_t *data,
+                                    uint16_t size);
+HAL_StatusTypeDef HAL_UART_AbortReceive_IT(UART_HandleTypeDef *h);
+#define __HAL_UART_CLEAR_OREFLAG(h) ((void)(h))
+#define HAL_UART_ERROR_NONE 0U
+#define HAL_UART_ERROR_ORE 8U
+#endif

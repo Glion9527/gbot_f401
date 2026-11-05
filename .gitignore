@@ -18,3 +18,12 @@ build/
 *.list
 *.lst
 *.log
+
+# 上位机本地环境、配对码与 ROS 2 构建目录
+__pycache__/
+*.py[cod]
+.venv/
+host_control/.local/
+.config/f401_robot/token
+ros2_ws/install/
+ros2_ws/log/

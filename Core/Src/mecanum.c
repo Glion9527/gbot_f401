@@ -2,12 +2,14 @@
 #include "motor4.h"
 #include <math.h>
 
+/* 对四个轮子统一限速后，一次性下发，避免出现只更新一部分轮子的情况。 */
 static bool SetScaled(double fl, double fr, double rl, double rr)
 {
     double wheel[4] = {fl, fr, rl, rr};
     double peak = 0.0;
 
     for (unsigned i = 0; i < 4; ++i) {
+        /* NaN/Inf 是无效数值，不能交给后面的 PI 控制或浮点转整数操作。 */
         if (!isfinite(wheel[i])) {
             return false;
         }
@@ -17,6 +19,8 @@ static bool SetScaled(double fl, double fr, double rl, double rr)
         }
     }
 
+    /* 例如最大轮速算出 220RPM、上限 110RPM，就把四路都乘 0.5。
+     * 只截断最快的一路会破坏四轮比例，使实际行驶方向/转弯曲率发生变化。 */
     double scale = peak > (double)MOTOR4_MAX_TARGET_RPM
                  ? (double)MOTOR4_MAX_TARGET_RPM / peak : 1.0;
 
@@ -31,7 +35,12 @@ bool Mecanum_SetMixRPM(float forward_rpm, float left_rpm, float ccw_rpm)
         return false;
     }
 
-    /* Double intermediates prevent overflow when summing finite float inputs. */
+    /* float 输入先转 double，避免多个很大的有限 float 相加时溢出。
+     * X 型轮组的混合公式（以下顺序为 FL、FR、RL、RR）：
+     *   左前 = 前进 - 左移 - 左转；右前 = 前进 + 左移 + 左转；
+     *   左后 = 前进 + 左移 - 左转；右后 = 前进 - 左移 + 左转。
+     * 只给 f 时四轮同速前进；只给 t 时左侧反转、右侧正转，原地左转；
+     * 同时给 f 和 t 可以边前进边转弯，是否反转取决于两者大小。 */
     double f = forward_rpm;
     double l = left_rpm;
     double t = ccw_rpm;
@@ -51,6 +60,9 @@ bool Mecanum_SetBodyVelocity(float forward_m_s, float left_m_s, float ccw_rad_s,
         return false;
     }
 
+    /* 轮缘线速度 v = 角速度 * 半径 r，因此轮子角速度 = v/r。
+     * 再用 1转 = 2π弧度、1分钟 = 60秒，把 rad/s 换算成 RPM。
+     * 转向分量还要乘 (半长 + 半宽)，体现底盘尺寸对旋转轮速的影响。 */
     const double rpm_per_rad_s = 60.0 / (2.0 * 3.14159265358979323846);
     double factor = rpm_per_rad_s / (double)wheel_radius_m;
     double f = (double)forward_m_s * factor;

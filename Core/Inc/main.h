@@ -89,7 +89,14 @@ void Error_Handler(void);
 #define TCK_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
-
+/* 上面的 CubeMX 宏把“功能名”和“具体端口/引脚”对应起来：
+ * 例如 AIN1_GPIO_Port=GPIOC、AIN1_Pin=GPIO_PIN_0，合起来就是 PC0。
+ * 电机接口对应：A=左前、B=左后、C=右后、D=右前；STBY=PA4 共用。
+ * B1=PC13 蓝色按键，LD2=PA5 绿色 LED；USART2_TX/RX=PA2/PA3。
+ * TMS=PA13、TCK=PA14 在本工程中保留给 SWD 下载/调试，
+ * CubeMX 上显示 SYS_JTMS-SWDIO、SYS_JTMS-SWCLK 是正常的。
+ * 定时器 PWM/编码器引脚采用复用功能，没有在这里逐一生成命名宏，见 tim.c。
+ * 若要更换引脚，应先在 CubeMX 修改并重新生成，再同步检查 motor4.c 的映射。 */
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

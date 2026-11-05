@@ -27,6 +27,15 @@ static size_t host_uart_length;
 static unsigned host_irq_phase_ms;
 static unsigned host_delay_events, host_run_events;
 static uint32_t host_delay_at, host_run_at;
+#if ROBOT_APP_MODE == 1
+static double host_encoder_fraction[4];
+static bool host_feedback_equal;
+static unsigned host_arc_events, host_second_events, host_route_events;
+static uint32_t host_arc_at, host_second_at, host_route_at, host_route_elapsed;
+static int64_t host_arc_origin[4], host_route_position[4];
+static long host_route_yaw_x10;
+static char host_route_phase[32];
+#endif
 
 uint32_t HAL_GetTick(void) { return host_ms; }
 void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pins, GPIO_PinState state)
@@ -57,6 +66,42 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *h, uint8_t *data,
         ++host_run_events;
         host_run_at = host_ms;
     }
+#if ROBOT_APP_MODE == 1
+    if (size >= 8U && memcmp(data, "SEGMENT ", 8) == 0) {
+        char line[384];
+        size_t length = size < sizeof(line) - 1U ? size : sizeof(line) - 1U;
+        memcpy(line, data, length);
+        line[length] = 0;
+        if (strstr(line, "phase=arc_left") != NULL) {
+            ++host_arc_events;
+            host_arc_at = host_ms;
+            Motor4Telemetry current[4];
+            Motor4_GetAllTelemetry(current);
+            for (unsigned i = 0; i < 4; ++i) host_arc_origin[i] = current[i].position;
+        } else if (strstr(line, "phase=straight_2") != NULL) {
+            ++host_second_events;
+            host_second_at = host_ms;
+        }
+    }
+    if (size >= 6U && memcmp(data, "ROUTE ", 6) == 0) {
+        char line[384];
+        size_t length = size < sizeof(line) - 1U ? size : sizeof(line) - 1U;
+        memcpy(line, data, length);
+        line[length] = 0;
+        unsigned long elapsed;
+        assert(sscanf(line, "ROUTE phase=%31s elapsed_ms=%lu yaw_x10=%ld",
+                      host_route_phase, &elapsed, &host_route_yaw_x10) == 3);
+        if (host_route_events != 0) {
+            assert((uint32_t)(host_ms - host_route_at) >= ROBOT_APP_PRINT_MS);
+        }
+        ++host_route_events;
+        host_route_at = host_ms;
+        host_route_elapsed = (uint32_t)elapsed;
+        Motor4Telemetry current[4];
+        Motor4_GetAllTelemetry(current);
+        for (unsigned i = 0; i < 4; ++i) host_route_position[i] = current[i].position;
+    }
+#endif
     size_t available = sizeof(host_uart) - host_uart_length - 1U;
     size_t copied = size < available ? size : available;
     memcpy(host_uart + host_uart_length, data, copied);
@@ -130,6 +175,16 @@ static void reset_hardware(void)
     host_irq_phase_ms = 0;
     host_delay_events = host_run_events = 0;
     host_delay_at = host_run_at = 0;
+#if ROBOT_APP_MODE == 1
+    memset(host_encoder_fraction, 0, sizeof(host_encoder_fraction));
+    host_feedback_equal = false;
+    host_arc_events = host_second_events = host_route_events = 0;
+    host_arc_at = host_second_at = host_route_at = host_route_elapsed = 0;
+    memset(host_arc_origin, 0, sizeof(host_arc_origin));
+    memset(host_route_position, 0, sizeof(host_route_position));
+    host_route_yaw_x10 = 0;
+    host_route_phase[0] = 0;
+#endif
 }
 static void fresh(void)
 {
@@ -541,8 +596,9 @@ static void test_mecanum(void)
     done("mecanum axis signs, proportional scaling, nonfinite rejection and geometry");
 }
 
-/* Simulate a 5 ms main loop and a 10 ms timer IRQ. Encoder movement is supplied
- * from target sign only: this checks application lifecycle, not motor physics. */
+/* Simulate a 5 ms main loop and a 10 ms timer IRQ. MODE1 integrates each
+ * wheel's own target with fractional counts; other modes retain sign feedback.
+ * These ideal counts check kinematics/lifecycle, not real motor physics. */
 static void app_advance_internal(unsigned duration, bool provide_feedback, bool poll)
 {
     for (unsigned elapsed = 0; elapsed < duration; elapsed += 5) {
@@ -556,7 +612,16 @@ static void app_advance_internal(unsigned duration, bool provide_feedback, bool 
                 if (provide_feedback && t.mode == MOTOR4_MODE_OPEN && t.pwm != 0) {
                     delta = t.pwm > 0 ? 5 : -5;
                 } else if (provide_feedback && t.mode == MOTOR4_MODE_SPEED && t.target_rpm != 0) {
+#if ROBOT_APP_MODE == 1
+                    const double cpr[4] = {MOTOR4_FL_CPR, MOTOR4_FR_CPR,
+                                           MOTOR4_RL_CPR, MOTOR4_RR_CPR};
+                    double rpm = host_feedback_equal ? 50.0 : (double)t.target_rpm;
+                    host_encoder_fraction[i] += rpm * cpr[i] * 0.01 / 60.0;
+                    delta = (int)host_encoder_fraction[i];
+                    host_encoder_fraction[i] -= delta;
+#else
                     delta = t.target_rpm > 0 ? 5 : -5;
+#endif
                 }
                 int raw = delta * enc_sign[i] * drive_sign[i];
                 encoders[i]->Instance->CNT =
@@ -716,10 +781,43 @@ static void test_robot_app(void)
     done("RobotApp held-at-boot, debounce, wheel cycle, deadman/timeout and fault refusal");
 }
 #else
+#if ROBOT_APP_MODE == 1
+static void assert_forward_route_targets(void)
+{
+    for (unsigned i = 0; i < 4; ++i) {
+        assert(view(i).mode == MOTOR4_MODE_SPEED);
+        assert(view(i).target_rpm >= 30.0f - 0.001f);
+        assert(view(i).target_rpm <= 85.0f + 0.001f);
+    }
+    assert(fabsf(view(MOTOR4_FL).target_rpm - view(MOTOR4_RL).target_rpm) < 0.001f);
+    assert(fabsf(view(MOTOR4_FR).target_rpm - view(MOTOR4_RR).target_rpm) < 0.001f);
+    assert(fabsf(fmaxf(view(0).target_rpm, view(1).target_rpm) - 85.0f) < 0.001f);
+}
+static double expected_route_yaw(const int64_t position[4])
+{
+    /* An independent fixed-geometry oracle, in logical FL,FR,RL,RR order. */
+    double combination = -(double)(position[0] - host_arc_origin[0])
+                       + (double)(position[1] - host_arc_origin[1])
+                       - (double)(position[2] - host_arc_origin[2])
+                       + (double)(position[3] - host_arc_origin[3]);
+    return combination * 90.0 * 80.0 / (405.0 * 3960.0);
+}
+static void assert_reported_route_yaw(void)
+{
+    assert(host_arc_events != 0 && host_route_events != 0);
+    assert(fabs((double)host_route_yaw_x10 / 10.0 -
+                expected_route_yaw(host_route_position)) < 0.11);
+    assert((uint32_t)(host_route_at - host_run_at) == host_route_elapsed);
+}
+#endif
 static void app_expected_running_targets(void)
 {
 #if ROBOT_APP_MODE == 1
     uint32_t elapsed = (uint32_t)(host_ms - host_run_at);
+    if (elapsed >= ROBOT_APP_FIRST_STRAIGHT_MS) {
+        assert_forward_route_targets();
+        return;
+    }
     uint32_t ramp_elapsed = elapsed < ROBOT_APP_RAMP_MS ? elapsed : ROBOT_APP_RAMP_MS;
     float target = ROBOT_APP_START_RPM + (ROBOT_APP_TEST_RPM - ROBOT_APP_START_RPM)
                  * (float)ramp_elapsed / (float)ROBOT_APP_RAMP_MS;
@@ -739,24 +837,28 @@ static void app_advance_running(unsigned duration)
         app_advance(5, true);
         assert((uint32_t)(host_ms - host_run_at) < ROBOT_APP_RUN_MS);
 #if ROBOT_APP_MODE == 1
-        if (host_set_all_calls != commands_before) {
-            assert(host_set_all_calls == commands_before + 1U);
-            app_expected_running_targets(); /* new commands use actual elapsed time */
-        } else {
-            near_targets(target_before, target_before, target_before, target_before);
-        }
-        assert(view(0).target_rpm >= target_before);
-        assert(view(0).target_rpm <= 85.0f);
         uint32_t age = (uint32_t)(host_ms - host_run_at);
-        if (age < ROBOT_APP_RAMP_MS) {
-            /* A 10ms command cadence may hold the previous value between polls. */
-            float latest = 15.0f + 70.0f * (float)age / 1000.0f;
-            assert(latest - view(0).target_rpm < 0.701f);
+        assert(host_set_all_calls <= commands_before + 1U);
+        if (age < ROBOT_APP_FIRST_STRAIGHT_MS) {
+            if (host_set_all_calls != commands_before) {
+                app_expected_running_targets(); /* new commands use actual elapsed time */
+            } else {
+                near_targets(target_before, target_before, target_before, target_before);
+            }
+            assert(view(0).target_rpm >= target_before);
+            assert(view(0).target_rpm <= 85.0f);
+            if (age < ROBOT_APP_RAMP_MS) {
+                /* A 10ms command cadence may hold the previous value between polls. */
+                float latest = 15.0f + 70.0f * (float)age / 1000.0f;
+                assert(latest - view(0).target_rpm < 0.701f);
+            } else {
+                near_targets(85, 85, 85, 85);
+            }
+            if (age_before >= ROBOT_APP_RAMP_MS) {
+                assert(host_set_all_calls == commands_before); /* steady first straight */
+            }
         } else {
-            near_targets(85, 85, 85, 85);
-        }
-        if (age_before >= ROBOT_APP_RAMP_MS) {
-            assert(host_set_all_calls == commands_before); /* no cruise resubmits */
+            assert_forward_route_targets();
         }
 #else
         app_expected_running_targets();
@@ -810,6 +912,12 @@ static void test_click_lifecycle(void)
 #if ROBOT_APP_MODE == 1
     assert(ROBOT_APP_START_RPM == 15.0f && ROBOT_APP_TEST_RPM == 85.0f);
     assert(ROBOT_APP_RAMP_MS == 1000U);
+    assert(ROBOT_APP_RUN_MS == 12000U && ROBOT_APP_FIRST_STRAIGHT_MS == 5000U);
+    assert(ROBOT_APP_WHEEL_DIAMETER_MM == 80.0f && ROBOT_APP_WHEELBASE_MM == 185.0f);
+    assert(ROBOT_APP_TRACK_MM == 220.0f && ROBOT_APP_TURN_DEG == 90.0f);
+    assert(ROBOT_APP_ARC_TURN_RPM == 27.5f && ROBOT_APP_ARC_SLOWDOWN_DEG == 20.0f);
+    assert(ROBOT_APP_ARC_TOLERANCE_DEG == 1.0f && ROBOT_APP_ARC_SETTLE_MS == 150U);
+    assert(ROBOT_APP_ARC_RAMP_MS == 300U);
 #else
     assert(ROBOT_APP_TEST_RPM == 15.0f);
 #endif
@@ -840,20 +948,52 @@ static void test_click_lifecycle(void)
     assert(host_run_events == 1);
     assert(run_messages() == 1);
     uint32_t elapsed = (uint32_t)(host_ms - host_run_at);
+#if ROBOT_APP_MODE == 1
+    app_advance_running(ROBOT_APP_FIRST_STRAIGHT_MS - elapsed - 5U);
+    near_targets(85, 85, 85, 85);
+    assert(host_arc_events == 0 && host_second_events == 0);
+    assert(host_set_all_calls == cruise_commands);
+    app_advance_running(5);
+    assert(host_arc_events == 1 && host_second_events == 0);
+    assert((uint32_t)(host_arc_at - host_run_at) == 5000U);
+    app_advance_running(300);
+    assert(view(MOTOR4_FL).target_rpm < view(MOTOR4_FR).target_rpm);
+    assert(view(MOTOR4_RL).target_rpm < view(MOTOR4_RR).target_rpm);
+    assert_forward_route_targets();
+    assert_reported_route_yaw();
+    elapsed = (uint32_t)(host_ms - host_run_at);
+#endif
     app_advance_running(ROBOT_APP_RUN_MS - elapsed - 5U);
     assert((uint32_t)(host_ms - host_run_at) == ROBOT_APP_RUN_MS - 5U);
     app_expected_running_targets();
     assert_no_faults(); /* Poll must keep refreshing the motor watchdog */
-    assert(host_run_events == 1 && host_set_all_calls == cruise_commands);
+    assert(host_run_events == 1);
+#if ROBOT_APP_MODE == 1
+    assert(host_second_events == 1);
+    assert((uint32_t)(host_second_at - host_run_at) > 5000U);
+    assert((uint32_t)(host_second_at - host_run_at) < 12000U);
+    assert(strcmp(host_route_phase, "straight_2") == 0);
+    assert(fabs((double)host_route_yaw_x10 / 10.0 - 90.0) <= 1.0);
+    assert_reported_route_yaw();
+    const char *a_print = strstr(host_uart, "A/FL cnt=");
+    const char *b_print = strstr(host_uart, "B/RL cnt=");
+    const char *c_print = strstr(host_uart, "C/RR cnt=");
+    const char *d_print = strstr(host_uart, "D/FR cnt=");
+    assert(a_print != NULL && b_print != NULL && c_print != NULL && d_print != NULL);
+    assert(a_print < b_print && b_print < c_print && c_print < d_print);
+#else
+    assert(host_set_all_calls == cruise_commands);
+#endif
+    unsigned completed_commands = host_set_all_calls;
     app_advance(5, true);
     assert_all_stopped();
     assert(strstr(host_uart, "STOP reason=timeout") != NULL);
     app_advance(2000, true);
     assert_all_stopped();
-    assert(host_run_events == 1 && host_set_all_calls == cruise_commands);
+    assert(host_run_events == 1 && host_set_all_calls == completed_commands);
     app_click();
     start_after_delay();
-    assert(host_run_events == 2 && host_set_all_calls == cruise_commands + 1U);
+    assert(host_run_events == 2 && host_set_all_calls == completed_commands + 1U);
     app_advance_running(250); /* stop during acceleration, not only during cruise */
     unsigned stopped_commands = host_set_all_calls;
     host_button = true;
@@ -865,7 +1005,7 @@ static void test_click_lifecycle(void)
     app_advance(2000, true);
     assert_all_stopped();
     assert(host_run_events == 2 && host_set_all_calls == stopped_commands && host_delay_events == 2);
-    done("click lifecycle: 1s delay, atomic targets/ramp, 10s from first RUN and press-to-stop");
+    done("click lifecycle: delay, ramp/route, total deadline, restart and press-to-stop");
 }
 static void test_click_debounce_and_cancellation(void)
 {
@@ -1030,12 +1170,180 @@ static void test_click_wrap_and_motion_guard(void)
     assert(host_run_events == 0 && host_set_all_calls == 0);
     done("click uint32 timer wrap and pending cancellation when wheels are moving");
 }
+#if ROBOT_APP_MODE == 1
+static void route_start(uint32_t time_base)
+{
+    fresh_app(time_base);
+    app_click();
+    start_after_delay();
+}
+static void route_wait_for_second_straight(void)
+{
+    while (host_second_events == 0 &&
+           (uint32_t)(host_ms - host_run_at) < ROBOT_APP_RUN_MS - 5U) {
+        app_advance_running(5);
+    }
+    assert(host_second_events == 1);
+    assert_forward_route_targets();
+}
+static void route_manual_tick(int left, int right)
+{
+    tick(left, right, left, right, false);
+    RobotApp_Poll();
+    assert_forward_route_targets();
+    assert_no_faults();
+}
+static double current_route_yaw(void)
+{
+    int64_t current[4];
+    for (unsigned i = 0; i < 4; ++i) current[i] = view(i).position;
+    return expected_route_yaw(current);
+}
+static void test_route_geometry_and_repeated_click(void)
+{
+    /* Distinct nonzero baselines prove that heading uses the atomic snapshot
+     * at the arc boundary, including when physical 16-bit counters wrap. */
+    fresh();
+    tick(30000, 28000, 26000, 24000, false);
+    tick(30000, 28000, 26000, 24000, false);
+    quiet(20);
+    RobotApp_Init();
+    app_release_and_arm();
+    app_click();
+    start_after_delay();
+    app_advance_running(5000);
+    assert(host_arc_events == 1 && host_second_events == 0);
+    assert(view(0).position > 65535);
+    assert(encoders[0]->Instance->CNT == ((uint32_t)view(0).position & 65535U));
+    for (unsigned i = 0; i < 4; ++i) assert(host_arc_origin[i] == view(i).position);
+    assert(fabs(current_route_yaw()) < 0.001);
+
+    /* A 90-degree turn needs 20047.5 differential counts at D80/L185/W220.
+     * Supply known counts directly, independently of the target-speed model. */
+    for (unsigned n = 0; n < 190; ++n) route_manual_tick(1, 51);
+    assert(fabs(current_route_yaw() - 85.29741863) < 0.001);
+    assert(host_second_events == 0);
+    assert_reported_route_yaw();
+    route_manual_tick(1, 525); /* differential sum 20048: approximately 90.002 deg */
+    assert(fabs(current_route_yaw() - 90.00224467) < 0.001);
+    for (unsigned n = 0; n < 5; ++n) route_manual_tick(10, 10);
+    assert(host_second_events == 0); /* passing through 90 is insufficient */
+    route_manual_tick(525, 1); /* leave tolerance and reset the settle interval */
+    assert(host_second_events == 0 && current_route_yaw() < 89.0);
+    route_manual_tick(1, 525);
+    uint32_t reentered_at = host_ms;
+    for (unsigned n = 0; n < 14; ++n) route_manual_tick(10, 10);
+    assert(host_second_events == 0);
+    route_manual_tick(10, 10);
+    assert(host_second_events == 1);
+    assert((uint32_t)(host_second_at - reentered_at) == 150U);
+    assert_forward_route_targets();
+
+    /* The second straight retains heading correction while all wheels remain
+     * forward: an overshoot slows the right pair for a clockwise correction. */
+    route_manual_tick(1, 225);
+    for (unsigned n = 0; n < 10; ++n) route_manual_tick(10, 10);
+    assert(current_route_yaw() > 91.0);
+    assert(view(MOTOR4_FL).target_rpm > view(MOTOR4_FR).target_rpm);
+    assert(view(MOTOR4_RL).target_rpm > view(MOTOR4_RR).target_rpm);
+    route_manual_tick(225, 1);
+    for (unsigned n = 0; n < 20; ++n) route_manual_tick(10, 10);
+    assert_reported_route_yaw();
+
+    int64_t first_origin[4];
+    memcpy(first_origin, host_arc_origin, sizeof(first_origin));
+    host_button = true;
+    app_advance(5, true);
+    assert_all_stopped();
+    app_release_and_arm();
+    app_click();
+    start_after_delay();
+    app_advance_running(5000);
+    assert(host_arc_events == 2 && host_second_events == 1);
+    for (unsigned i = 0; i < 4; ++i) {
+        assert(host_arc_origin[i] == view(i).position);
+        assert(host_arc_origin[i] > first_origin[i]);
+    }
+    assert(fabs(current_route_yaw()) < 0.001);
+    app_advance_running(200);
+    assert_reported_route_yaw();
+    assert(host_second_events == 1 && current_route_yaw() < 10.0);
+    host_button = true;
+    app_advance(5, true);
+    assert_all_stopped();
+    done("route geometry, 16-bit wrap, 150ms settle, heading hold and fresh click origins");
+}
+static void test_route_without_differential_feedback(void)
+{
+    route_start(UINT32_MAX - 6500U); /* the arc slew interval crosses HAL tick wrap */
+    host_feedback_equal = true;
+    app_advance_running(ROBOT_APP_RUN_MS - 5U);
+    assert(host_arc_events == 1 && host_second_events == 0);
+    assert(strcmp(host_route_phase, "arc_left") == 0);
+    assert(host_route_yaw_x10 == 0);
+    assert(view(MOTOR4_FL).target_rpm < view(MOTOR4_FR).target_rpm);
+    assert_forward_route_targets();
+    assert_reported_route_yaw();
+    app_advance(5, true);
+    assert_all_stopped();
+    assert_no_faults(); /* moving wheels with zero differential are not encoder loss */
+    assert(strstr(host_uart, "STOP reason=timeout_arc_incomplete") != NULL);
+    unsigned commands = host_set_all_calls;
+    app_advance(2000, true);
+    assert(host_run_events == 1 && host_second_events == 0);
+    assert(host_set_all_calls == commands);
+    done("route needs encoder differential for completion and stops at total 12s deadline");
+}
+static void test_route_stage_stop_and_faults(void)
+{
+    for (unsigned phase = 0; phase < 2; ++phase) {
+        for (unsigned cause = 0; cause < 3; ++cause) {
+            route_start(0);
+            app_advance_running(5300);
+            if (phase == 1) route_wait_for_second_straight();
+            else assert(host_arc_events == 1 && host_second_events == 0);
+            app_advance_running(100);
+            unsigned commands = host_set_all_calls;
+            if (cause == 0) {
+                host_button = true;
+                app_advance(5, true);
+                assert(strstr(host_uart, "STOP reason=user_stop") != NULL);
+            } else if (cause == 1) {
+                Host_InjectFault(MOTOR4_RR, MOTOR4_FAULT_WRONG_DIRECTION);
+                app_advance(5, true);
+                assert(strstr(host_uart, "STOP reason=motor_fault") != NULL);
+            } else {
+                app_advance_internal(MOTOR4_WATCHDOG_MS + 10U, true, false);
+                assert(view(0).fault & MOTOR4_FAULT_WATCHDOG);
+                RobotApp_Poll();
+            }
+            assert_all_stopped();
+            app_advance(2000, true);
+            host_button = false;
+            app_advance(2000, true);
+            if (cause != 0) {
+                assert(Motor4_ClearFaults());
+                app_advance(2000, true);
+            }
+            assert_all_stopped();
+            assert(host_run_events == 1 && host_delay_events == 1);
+            assert(host_set_all_calls == commands);
+        }
+    }
+    done("arc and second straight stop on raw USER, latched fault or watchdog without restart");
+}
+#endif
 static void test_robot_app(void)
 {
     test_click_lifecycle();
     test_click_debounce_and_cancellation();
     test_click_faults_and_watchdog();
     test_click_wrap_and_motion_guard();
+#if ROBOT_APP_MODE == 1
+    test_route_geometry_and_repeated_click();
+    test_route_without_differential_feedback();
+    test_route_stage_stop_and_faults();
+#endif
 }
 #endif
 

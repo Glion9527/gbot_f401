@@ -5,11 +5,24 @@ NUCLEO-F401RE + D24A四路TB6612 + 四台12V110RPM编码器电机
 不再需要执行导入脚本。改线、生成和下载期间关闭驱动板电源。
 单路的3圈11880计数采用CPR3960；四台同型号先使用相同初值。
 
-当前按键程序：MODE1前进目标85RPM，PWM最高允许100%（千分比1000），
-给最慢轮留出调速余量；底层可接受目标上限仍为110RPM。
-短按并松开USER后等待1秒；启动时从15RPM用1秒升至85RPM，
-从启动共运行10秒后停止（含1秒加速，目标85RPM阶段约9秒）。
-等待时再按取消，运行时再按停止；实际转速取决于电池电压和负载。
+当前默认程序已切为MODE7遥控：Mac接串口，经TCP中转给Ubuntu/ROS 2。
+上电和连接不自动运动，需显式使能；蓝色USER在此模式仅用于软件停止。
+完整操作见 docs/遥控上手.md，协议见 docs/remote-control-protocol.md。
+遥控目标按比例限到60RPM，300ms无有效运动命令则解除使能。
+
+原按键路线仍保留：改为MODE1可执行“直行5秒 -> 前进中左转弧线约90度 -> 沿新方向直行”。
+直行目标85RPM，PWM最高允许100%（千分比1000），底层目标上限仍110RPM。
+短按并松开USER后等待1秒；启动时从15RPM用1秒升至85RPM，包含在首段5秒内。
+从启动起共运行12秒，包含首段、弧线和末段直行，不包含按钮后的1秒等待。
+轮径D=80mm，前后轮中心距L=185mm，左右轮中心距W=220mm。
+弧线全程轮子向前：外侧轮最高85RPM，内侧轮最低30RPM，转向量用300ms缓变。
+根据四路累计编码器位置估算角度，接近90度时减小轮速差；误差连续在±1度内
+保持150ms后进入末段直行，并继续用编码器估角做小幅航向修正。
+编码器估角存在麦轮打滑、轮径和CPR标定误差，实际90度仍需落地验证校准。
+串口SEGMENT显示阶段切换，ROUTE显示阶段、启动后毫秒数和yaw_x10估角（900=90度），
+角度以弧线开始时的车头方向为0度，不是绝对罗盘方向。
+启动12秒后统一停止；若弧线未完成则提示timeout_arc_incomplete，不强行切入末段。
+等待时再按取消，运行时再按停止；实际速度/转角取决于供电、负载和地面条件。
 MODE2..6仍保留15RPM低速动作。参数在Core/Inc/robot_app.h，
 反馈故障与软件看门狗继续保留，但软启动不等于硬件电流保护。
 
@@ -45,7 +58,7 @@ shared standby      PA4       CN7-32 / A2      STBY
 common ground       GND       CN6-6/7          GND
 
 保留PA2/PA3的USART2，PA13/PA14的SWD，PC13蓝色USER按键，PA5绿灯。
-3V3/5V电源输出不在两块板之间并联；NUCLEO仍用USB供电。
+3V3/5V电源输出不在两块板之间并联；NUCLEO沿用已验证的USB或外部E5V供电方案，JP5与供电方式对应。
 当前A路PA0->AIN1、PA1->AIN2必须拆掉，方向线迁移到PC0/PC1。
 原A路PA6/PA7编码器、PA8 PWM和PA4 STBY保持。
 
@@ -94,6 +107,8 @@ common ground       GND       CN6-6/7          GND
    PC13板载B1按键保留现有设置，无需新增按键中断。
 
 7. USART2保持115200、8N1、TX/RX、No Flow Control。
+   遥控模式新增USART2 global interrupt，Preemption Priority6、Sub Priority0。
+   当前.ioc和源码已同步，四轮接线无需变化；TIM9优先级仍为5。
    Project Manager保留STM32CubeIDE、每外设单独.c/.h、Keep User Code。
    保存，Generate Code后在CubeIDE刷新工程并编译。
    保留当前Core中的motor4、mecanum、robot_app和main的USER CODE区，无需再次导入。
