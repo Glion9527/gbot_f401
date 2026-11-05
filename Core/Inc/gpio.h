@@ -33,7 +33,9 @@ extern "C" {
 /* USER CODE END Includes */
 
 /* USER CODE BEGIN Private defines */
-
+/* MX_GPIO_Init 配置普通输入/输出引脚的模式和初始电平。
+ * B1_Pin、STBY_Pin、AIN1_Pin 等“名字到物理引脚”的宏在 main.h；
+ * 方向引脚和 STBY 的运行时切换由 motor4/remote_control 等应用模块负责。 */
 /* USER CODE END Private defines */
 
 void MX_GPIO_Init(void);

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """只检查链路和遥测，不发送 ARM 或非零速度。"""
+# 在实际遥控前可用它确认 TCP 认证、Mac 串口握手和 STM32 遥测是否连通。
+# status 读取网关缓存中仍有效的遥测，调用频率不等于 STM32 采样或发送频率。
 import argparse
 import json
 import sys
@@ -18,8 +20,10 @@ def main():
         client = RobotClient(args.host, args.port, token_from_arguments(args))
         welcome = client.connect()
         print("连接成功，未使能电机。session=%s" % welcome["telemetry"]["session"], flush=True)
+        # monotonic 是只用于计时差的单调时钟，不受系统日期/时区调整影响。
         start, last_print = time.monotonic(), 0.0
         while args.seconds <= 0 or time.monotonic() - start < args.seconds:
+            # 通信约 20Hz、显示约 1Hz：持续验证链路，同时避免终端每次请求都刷屏。
             due = time.monotonic() + 0.05
             reply = client.request("status")
             if not reply["ok"]:
@@ -35,6 +39,7 @@ def main():
         return 1
     finally:
         if client is not None:
+            # 探测期间不发运动指令；退出仍使用公共 close()，它会尽力发送一次 STOP。
             client.close()
     return 0
 

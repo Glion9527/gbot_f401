@@ -1,3 +1,6 @@
+/* 遥控模式的电脑端 C 回归：输入实际格式的串口字节，观察 ACK/T 和电机状态。
+ * 命令解析、会话校验和运动换算来自真实 Core 源码；此文件模拟接收回调、
+ * 编码器和毫秒推进，也可以导出固件实际编码的帧供 Python 端核对。 */
 #include "motor4.h"
 #include "remote_control.h"
 #include "tim.h"
@@ -236,6 +239,7 @@ static void test_initial_and_arm_guard(void)
     done("boot is stopped; explicit arm requires fresh sequence, released button and 250ms quiet");
 }
 
+/* 分批送入帧字节，覆盖一次接收不完整命令、CRC错误和帧边界的处理。 */
 static void test_crc_fragmentation_and_frames(void)
 {
     assert(reference_crc("123456789",9)==0x29b1U);
@@ -286,6 +290,7 @@ static void test_strict_numbers_and_limits(void)
     done("strict decimal grammar and numeric/field bounds reject malformed motor commands");
 }
 
+/* 车身整数速度进入真实麦轮公式，检查几何换算和遥控层的轮速限幅。 */
 static void test_kinematics_and_cap(void)
 {
     const int inputs[][3]={{50,0,0},{0,50,0},{0,0,250},{150,150,600}};
@@ -320,6 +325,7 @@ static void test_kinematics_and_cap(void)
     done("body units and X-mecanum geometry, FL/FR/RL/RR mapping and equal 60RPM cap");
 }
 
+/* 新会话隔离旧指令，seq 防重放，并验证 uint32 回绕附近的新旧比较。 */
 static void test_sequence_and_session(void)
 {
     start_forward(); clear_output();
@@ -343,6 +349,7 @@ static void test_sequence_and_session(void)
     done("new session disarms; mismatched/replayed commands cannot move; uint32 sequence wrap works");
 }
 
+/* 只推进控制中断也必须使过期命令停止；重新使能后不能复用旧速度。 */
 static void test_tick_timeout_and_no_stale_rearm(void)
 {
     start_forward();
@@ -468,6 +475,7 @@ static void test_arm_motion_guard_and_duplicate_freshness(void)
     done("arm needs a new 250ms quiet interval after encoder motion; repeated V cannot feed timeout");
 }
 
+/* 检查遥测字段、64位计数格式及毫秒计数回绕后的协议时效。 */
 static void test_telemetry_and_clock_wrap(void)
 {
     fresh(); connect_and_arm(); clear_output();

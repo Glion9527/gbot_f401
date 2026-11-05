@@ -45,7 +45,10 @@ extern TIM_HandleTypeDef htim5;
 extern TIM_HandleTypeDef htim9;
 
 /* USER CODE BEGIN Private defines */
-
+/* extern 声明句表示这些句柄已在 tim.c 中定义，本头文件不再创建一份。
+ * 句柄把硬件寄存器地址、配置和 HAL 状态关联起来：htim1 管 PWM，
+ * htim2/3/4/5 管四个编码器，htim9 管 10ms 周期。
+ * MX_TIMx_Init 配置这些对象；应用随后通过 &htimx 操作同一套硬件状态。 */
 /* USER CODE END Private defines */
 
 void MX_TIM1_Init(void);

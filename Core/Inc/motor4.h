@@ -110,6 +110,10 @@ typedef struct {
     uint8_t fault;     /* 故障位锁存；任一路故障均使四路停止 */
 } Motor4Telemetry;
 
+/* 数据关系示例：CPR=3960时，position=3960表示相对初始化位置正向累计一圈；
+ * rpm=15表示当前约15转/分钟。位置可以继续累加，转速则可在停机后降为0。
+ * position并不是米，rpm也不是车身m/s；车身换算还需要轮径和底盘几何关系。 */
+
 /* 先执行Cube生成的GPIO/TIM1/2/3/4/5初始化，再调用一次本函数。
  * 本模块启动PWM和编码器；TIM9的10ms中断由main最后启动。
  * 初始化成功后仍处于停止状态，不会自行转动。 */
@@ -124,6 +128,7 @@ void Motor4_ControlTick10ms(void);
  * 开环PWM夹到±MOTOR4_PWM_LIMIT；速度命令超出±MOTOR4_MAX_TARGET_RPM会拒绝。
  * PWM为千分比，1000对应100%占空比；本模块没有电流采样或限流。 */
 bool Motor4_SetOpenLoop(Motor4Id id, int16_t pwm);
+/* 单轮闭环主要供独立测试；整车运动优先由mecanum调用下面的四轮一起设速接口。 */
 bool Motor4_SetSpeedRPM(Motor4Id id, float rpm);
 
 /* 参数依次为左前、右前、左后、右后，单位RPM，允许正负或0。

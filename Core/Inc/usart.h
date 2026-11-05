@@ -35,7 +35,9 @@ extern "C" {
 extern UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN Private defines */
-
+/* huart2 在 usart.c 中定义，&huart2 是 HAL 串口收发和中断处理使用的句柄。
+ * MX_USART2_UART_Init 配置 115200/8N1；遥控协议的帧格式、队列和命令处理
+ * 属于 remote_control.c，不由这个外设头文件决定。 */
 /* USER CODE END Private defines */
 
 void MX_USART2_UART_Init(void);

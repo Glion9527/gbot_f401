@@ -1,3 +1,5 @@
+/* 测试专用 main.h：在电脑上提供算法需要的 HAL 类型、GPIO 和中断状态替代。
+ * 这里的 GPIOA 等指向测试变量，不访问 STM32 的真实内存映射寄存器。 */
 #ifndef HOST_MAIN_H
 #define HOST_MAIN_H
 #include <stdint.h>

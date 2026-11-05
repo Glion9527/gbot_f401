@@ -1,3 +1,4 @@
+/* 遥控测试还需要模拟接收中断和 UART 错误；实际接收动作由 C 测试程序驱动。 */
 #ifndef HOST_REMOTE_USART_H
 #define HOST_REMOTE_USART_H
 #include "main.h"

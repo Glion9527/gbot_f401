@@ -30,6 +30,8 @@ static bool SetScaled(double fl, double fr, double rl, double rr)
 
 bool Mecanum_SetMixRPM(float forward_rpm, float left_rpm, float ccw_rpm)
 {
+    /* 上层路线/动作测试使用本接口；三个参数可以混合，但每个参数必须是有限数。
+     * “向前15、向左0、左转0”表示轮速分量，不表示小车向前15米/秒。 */
     if (!isfinite(forward_rpm) || !isfinite(left_rpm) ||
         !isfinite(ccw_rpm)) {
         return false;
@@ -52,6 +54,8 @@ bool Mecanum_SetBodyVelocity(float forward_m_s, float left_m_s, float ccw_rad_s,
                             float wheel_radius_m,
                             float half_length_m, float half_width_m)
 {
+    /* 遥控层使用此接口：例如串口vx=80mm/s会先变成forward_m_s=0.08。
+     * 正的几何尺寸是换算的前提，尤其轮半径位于除数中，不能为0。 */
     if (!isfinite(forward_m_s) || !isfinite(left_m_s) ||
         !isfinite(ccw_rad_s) || !isfinite(wheel_radius_m) ||
         !isfinite(half_length_m) || !isfinite(half_width_m) ||
@@ -76,5 +80,6 @@ bool Mecanum_SetBodyVelocity(float forward_m_s, float left_m_s, float ccw_rad_s,
 
 void Mecanum_Stop(void)
 {
+    /* 运动层只提供统一接口，具体清目标、撤销STBY和保留位置等由电机层完成。 */
     Motor4_StopAll();
 }

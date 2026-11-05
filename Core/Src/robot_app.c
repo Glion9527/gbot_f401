@@ -24,6 +24,8 @@ void RobotApp_Init(void)
 
 void RobotApp_Poll(void)
 {
+    /* 模式7不执行下面的本地按键状态机或普通文本日志；通信和控制许可统一
+     * 由remote_control维护，串口协议遥测也由它发送。 */
     RemoteControl_Poll();
 }
 
@@ -162,6 +164,7 @@ static bool SetRouteCommand(float forward, float turn)
 
 static const char *RoutePhaseName(void)
 {
+    /* 英文短名用于串口诊断，状态机判断仍使用上面的枚举值。 */
     if (s_route_phase == ROUTE_ARC_LEFT) return "arc_left";
     if (s_route_phase == ROUTE_STRAIGHT_2) return "straight_2";
     return "straight_1";
@@ -216,6 +219,8 @@ static void UpdateRouteYaw(const Motor4Telemetry t[MOTOR4_COUNT])
 static bool StartCommand(void)
 {
 #if ROBOT_APP_MODE == 0
+    /* s_next_wheel是A/B/C/D测试序号，经s_test_order换成电机层的逻辑轮号。
+     * 只有命令接受成功才推进下一轮，避免被拒绝后悄悄跳过接线测试。 */
     s_active_wheel = (unsigned)s_test_order[s_next_wheel];
     if (!Motor4_SetOpenLoop((Motor4Id)s_active_wheel, ROBOT_APP_TEST_PWM)) {
         return false;
@@ -241,6 +246,8 @@ static bool StartCommand(void)
 #if ROBOT_APP_MODE == 1
 static bool UpdateRoute(uint32_t now, const Motor4Telemetry t[MOTOR4_COUNT])
 {
+    /* 路线是车身动作的外层控制，电机层仍独立每10ms调节各轮速度。
+     * now和s_start_ms都来自HAL毫秒时钟；Poll快慢只影响本次是否需要更新目标。 */
     uint32_t elapsed = (uint32_t)(now - s_start_ms);
     if (s_route_phase == ROUTE_STRAIGHT_1) {
         if (elapsed >= ROBOT_APP_FIRST_STRAIGHT_MS) {
@@ -350,6 +357,8 @@ static void PrintRouteEnd(uint32_t stopped_ms)
 
 static void PrintReady(void)
 {
+    /* READY表示按键流程已准备好，不表示底盘已开始运动或串口远程已使能。
+     * 宏分支会令输出内容对应本次编译选中的本地模式。 */
     char line[320];
 #if ROBOT_APP_MODE == 0
     int n = snprintf(line, sizeof(line),
@@ -378,6 +387,7 @@ static void PrintReady(void)
 
 static void PrintRunning(void)
 {
+    /* 记录命令接受时的运行参数；真正转速继续看随后每轮的rpm_x10反馈。 */
     char line[320];
 #if ROBOT_APP_MODE == 0
     int n = snprintf(line, sizeof(line),
@@ -442,6 +452,7 @@ static void PollHoldTest(uint32_t now, bool pressed,
 
     switch (s_state) {
     case WAIT_RELEASE:
+        /* 先松手一次才能重新就绪；运行停止后不能一直按住而自动测下一轮。 */
         if (!pressed) { s_key_ms = now; s_state = RELEASE_FILTER; }
         break;
     case RELEASE_FILTER:
@@ -456,6 +467,7 @@ static void PollHoldTest(uint32_t now, bool pressed,
         if (pressed) { s_key_ms = now; s_state = PRESS_FILTER; }
         break;
     case PRESS_FILTER:
+        /* 按住模式在“按下已稳定”后即启动，运行中松手则立即Finish。 */
         if (!pressed) s_state = WAIT_PRESS;
         else if ((uint32_t)(now - s_key_ms) >= ROBOT_APP_DEBOUNCE_MS) {
             if (HasFault(t)) Finish("fault_latched_check_wiring_then_reset");
@@ -476,6 +488,7 @@ static void PollHoldTest(uint32_t now, bool pressed,
 #else
 static void PrintDelay(void)
 {
+    /* 预约等待信息在状态切换时只打印一次，不在每轮Poll重复发送。 */
     char line[320];
 #if ROBOT_APP_MODE == 1
     int n = snprintf(line, sizeof(line),
@@ -532,9 +545,11 @@ static void PollClickDrive(uint32_t now, bool pressed,
         }
         break;
     case WAIT_CLICK_RELEASE:
+        /* 与模式0不同：点击模式必须等到“按下后再松开”才安排启动。 */
         if (!pressed) { s_key_ms = now; s_state = CLICK_RELEASE_FILTER; }
         break;
     case CLICK_RELEASE_FILTER:
+        /* 松开也要稳定30ms；抖回按下时回到等待松开，避免误发一次启动。 */
         if (pressed) s_state = WAIT_CLICK_RELEASE;
         else if ((uint32_t)(now - s_key_ms) >= ROBOT_APP_DEBOUNCE_MS) {
             Motor4_StopAll();

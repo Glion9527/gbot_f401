@@ -1,4 +1,6 @@
 """终端点按遥控：200ms 没有新按键即发布零速度；终端没有 key-up 事件。"""
+# 本节点把键盘操作变成/cmd_vel消息，由network_bridge转交给Mac网关。
+# 它不打开串口，也不执行电机PI；使能/停止通过ROS Trigger服务请求桥接节点完成。
 import os
 import math
 import select
@@ -28,11 +30,13 @@ class Keyboard(Node):
                 math.isfinite(self._key_timeout) and 0.05 <= self._key_timeout <= 0.25):
             raise ValueError('linear_speed需在(0,.15]，angular_speed在(0,.6]，key_timeout在[.05,.25]')
         self._pub = self.create_publisher(TwistStamped, '/cmd_vel', 1)
+        # 服务客户端发送一次性操作请求；持续速度通过话题发布，两者职责不同。
         self._arm = self.create_client(Trigger, '/robot/arm')
         self._stop = self.create_client(Trigger, '/robot/disarm')
         self._velocity = (0.0, 0.0, 0.0)
         self._key_at = 0.0
         self._enabled = False
+        # _pending保存未完成的服务Future；_generation标识最新请求，淘汰晚到的旧回复。
         self._pending = None
         self._generation = 0
         self.create_timer(0.05, self._tick)
@@ -44,6 +48,7 @@ class Keyboard(Node):
             self._linear_speed, self._angular_speed, self._key_timeout * 1000), flush=True)
 
     def _service(self, arm):
+        # 无论使能还是停止，都先把本地速度清零，服务确认前不会继续发布旧运动目标。
         self._enabled = False
         self._velocity = (0.0, 0.0, 0.0)
         if arm and self._pending is not None and not self._pending.done():
@@ -58,6 +63,7 @@ class Keyboard(Node):
         self._pending = client.call_async(Trigger.Request())
 
         def completed(future):
+            # Future可能在STOP之后才返回；只有当前代数的回复可以改变输入许可。
             if generation != self._generation:
                 return
             try:
@@ -76,6 +82,7 @@ class Keyboard(Node):
         if select.select([sys.stdin], [], [], 0)[0]:
             keys = os.read(sys.stdin.fileno(), 256).decode('ascii', errors='ignore').lower()
         key = '\x03' if '\x03' in keys else ' ' if ' ' in keys else keys[-1:] or None
+        # 同批字符中Ctrl-C和空格具有更高优先级，其余只处理最后一个键。
         if key == '\x03':
             raise KeyboardInterrupt
         if key == 'r':
@@ -90,9 +97,12 @@ class Keyboard(Node):
             self._velocity = choices.get(key, (0.0, 0.0, 0.0))
             self._key_at = time.monotonic()
         velocity = self._velocity if self._enabled and time.monotonic() - self._key_at < self._key_timeout else (0.0, 0.0, 0.0)
+        # 终端只能收到字符，没有真实松键通知；依靠最近按键时间决定本周期是否归零。
         self.publish(velocity)
 
     def publish(self, velocity):
+        # velocity的单位就是ROS标准的m/s、rad/s，这里直接填字段。
+        # 时间戳供桥接节点判断消息年龄；base_link表示速度相对于车身，而非地图坐标系。
         msg = TwistStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'base_link'
@@ -100,6 +110,7 @@ class Keyboard(Node):
         self._pub.publish(msg)
 
     def stop_before_exit(self):
+        # 使旧服务回调失效，发布零速并短暂等待解除使能服务；不无限阻塞退出。
         self._generation += 1
         self._enabled = False
         self.publish((0.0, 0.0, 0.0))
@@ -109,12 +120,14 @@ class Keyboard(Node):
 
 
 def main(args=None):
+    # 需要真实交互终端才能读取按键和切换输入模式；结束时必须恢复原termios设置。
     if not sys.stdin.isatty():
         raise SystemExit('请在交互式 Ubuntu 终端运行键盘节点。')
     saved = termios.tcgetattr(sys.stdin)
     rclpy.init(args=args)
     node = None
     try:
+        # cbreak使按键无需回车就可读取；节点的50ms定时器非阻塞检查终端输入。
         tty.setcbreak(sys.stdin.fileno())
         node = Keyboard()
         rclpy.spin(node)

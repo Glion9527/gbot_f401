@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'ros2_ws/src/f401_r
 from f401_robot_bridge.control_state import CommandState, joint_values
 
 
+# 直接测试不依赖 rclpy 的状态类，重点核对 ROS 浮点单位到串口整数单位的关系。
 class CommandTests(unittest.TestCase):
     def test_no_implicit_arm_or_old_velocity(self):
         s = CommandState()
@@ -24,6 +25,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(s.velocity(10.1), (0, 0, 0))
 
     def test_source_age_counts_toward_expiry(self):
+        # 收到前已经耗掉的消息时间也计入有效期，不能把旧目标当成刚发布的新目标。
         s = CommandState()
         s.arm()
         self.assertTrue(s.accept(.1, 0, 0, 10, stamp_age=.2))
@@ -44,6 +46,7 @@ class CommandTests(unittest.TestCase):
                 self.assertEqual(s.velocity(1.1), (0, 0, 0))
 
     def test_joint_unit_conversion_and_order(self):
+        # 用已知整圈计数验证弧度换算，同时确认轮序必须是 FL/FR/RL/RR。
         t = {'wheels': [dict(id=i, count=3960 * k, rpm_x10=150)
                         for k, i in enumerate(['FL', 'FR', 'RL', 'RR'])]}
         position, velocity = joint_values(t, [3960.] * 4)

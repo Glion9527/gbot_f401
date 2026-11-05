@@ -1,3 +1,6 @@
+/* 电脑端四轮控制测试入口：链接 Core 中的真实算法，下面只替代硬件和时间。
+ * host_gpio/host_tim 是内存里的寄存器模型；测试推进计数器后调用真实控制 tick，
+ * 用 assert 检查输出。以 .c.txt 保存，由 run_tests.py 复制成临时 .c 后编译。 */
 #include "motor4.h"
 #include "tim.h"
 #include "usart.h"
@@ -239,6 +242,7 @@ static void done(const char *name)
     printf("PASS %s\n", name);
 }
 
+/* 保证 A/B/C/D 的物理接线、FL/FR/RL/RR 逻辑轮位和正反向校准约定一致。 */
 static void test_calibrated_configuration(void)
 {
     assert(MOTOR4_PWM_LIMIT == 1000);
@@ -286,6 +290,7 @@ static void test_init_and_failure_cleanup(void)
     done("initial STOP and initialization/configuration failure cleanup");
 }
 
+/* 人工改变四个 CNT，核对各自增量、16位回绕、RPM公式和位置累计。 */
 static void test_encoder_mapping_and_wrap(void)
 {
     /* Physical counter signs for vehicle-forward motion after the rear-wheel
@@ -329,6 +334,7 @@ static void test_encoder_mapping_and_wrap(void)
     done("four independent encoder routes, signs, wrap, RPM/filter and 64-bit position");
 }
 
+/* 核对千分比到 CCR 的换算，以及“单轮停、其他轮运行”的共享 STBY 处理。 */
 static void test_pwm_and_shared_stby(void)
 {
     fresh();
@@ -430,6 +436,7 @@ static void test_transactions_and_reversal(void)
     done("transactional validation and 200 ms quiet reversal guard");
 }
 
+/* 给定目标和模拟转速，检查 PI 输出、积分限幅和饱和时的积分处理。 */
 static void test_pi_and_antiwindup(void)
 {
     fresh();
@@ -538,6 +545,7 @@ static void near_targets(float fl, float fr, float rl, float rr)
     }
 }
 
+/* 用纯前进、纯横移、纯旋转及混合输入核对轮速符号和等比例限幅。 */
 static void test_mecanum(void)
 {
     fresh();
@@ -907,6 +915,7 @@ static void start_after_delay(void)
     assert(host_run_events == before + 1U && host_set_all_calls == commands + 1U);
     app_expected_initial_targets(); /* all four targets visible in the same poll */
 }
+/* 模拟完整点击后的延迟、启动、运行截止和停止，不需要按真实开发板按钮。 */
 static void test_click_lifecycle(void)
 {
 #if ROBOT_APP_MODE == 1
@@ -1199,6 +1208,7 @@ static double current_route_yaw(void)
     for (unsigned i = 0; i < 4; ++i) current[i] = view(i).position;
     return expected_route_yaw(current);
 }
+/* 路线测试用编码器差动反馈推进估计转角，检查直行/弧线/直行的阶段转换。 */
 static void test_route_geometry_and_repeated_click(void)
 {
     /* Distinct nonzero baselines prove that heading uses the atomic snapshot

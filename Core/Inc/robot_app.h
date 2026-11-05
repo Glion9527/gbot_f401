@@ -19,6 +19,8 @@
  * 麦轮需按 X 型安装，实际地面打滑或尺寸误差仍需通过落地测试核对。
  */
 #ifndef ROBOT_APP_MODE
+/* 默认7进入串口遥控；设为0..6会在编译时选择本地测试/路线代码。
+ * 这不是串口收到的运行时参数，不能靠ROS话题切换此宏。 */
 #define ROBOT_APP_MODE       7
 #endif
 #define ROBOT_APP_TEST_PWM   150    /* 仅模式 0：PWM 千分比，150 = 15% */
@@ -56,6 +58,9 @@
 #define ROBOT_APP_RUN_MS     10000U      /* 其余动作测试一次运行 10s */
 #endif
 #define ROBOT_APP_PRINT_MS   200U        /* 串口每 200ms 打印一次，不是 PI 控制周期 */
+
+/* 以上路线和按键参数服务于模式0..6；模式7的串口刷新超时、遥测周期和限速
+ * 在remote_control.c中定义。底层PWM上限、CPR和PI参数统一在motor4.h中定义。 */
 
 /* main 中初始化外设和 motor4 后调用一次。模式7启动接收并等待显式使能；
  * 模式0..6进入等待按钮松开状态。 */

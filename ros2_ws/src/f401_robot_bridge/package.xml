@@ -5,12 +5,15 @@
   <description>F401 mecanum base via authenticated Mac serial gateway.</description>
   <maintainer email="robot@example.invalid">Robot project</maintainer>
   <license>Proprietary</license>
+  <!-- ament_python表示这是Python ROS包，由setup.py描述安装和可执行入口。 -->
   <buildtool_depend>ament_python</buildtool_depend>
+  <!-- 运行时依赖：ROS Python API、速度/关节/状态消息和Trigger服务类型。 -->
   <exec_depend>rclpy</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
+  <!-- 图形键盘窗口需要Tk；终端键盘节点不依赖窗口显示。 -->
   <exec_depend>python3-tk</exec_depend>
   <export><build_type>ament_python</build_type></export>
 </package>

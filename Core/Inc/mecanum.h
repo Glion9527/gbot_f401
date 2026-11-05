@@ -21,6 +21,9 @@
  */
 bool Mecanum_SetMixRPM(float forward_rpm, float left_rpm, float ccw_rpm);
 
+/* 例如(15,0,0)给四轮都设+15RPM；(0,15,0)给[-15,+15,+15,-15]，形成左移。
+ * 以上是轮速目标。实际轮速要等编码器反馈与PI逐步追踪，不由本层直接保证。 */
+
 /* 使用车身物理速度的接口，轴向正方向与上面相同：
  * forward_m_s / left_m_s：前进/左移速度，单位 m/s；ccw_rad_s：角速度，单位 rad/s。
  * wheel_radius_m：轮子半径；half_length_m：前后轮中心距的一半；

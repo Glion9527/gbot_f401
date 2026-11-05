@@ -64,7 +64,10 @@ void HAL_MspInit(void)
 {
 
   /* USER CODE BEGIN MspInit 0 */
-
+  /* MSP 指 MCU Support Package，即 HAL 所需的底层硬件准备。
+   * HAL_Init 会调用本函数，打开系统配置和电源管理模块的时钟。
+   * 每个定时器/串口自己的引脚、时钟和中断配置，放在 tim.c/usart.c 的 MspInit 中。
+   * 这与主循环中的 RobotApp_Init 属于不同层次：前者准备硬件，后者准备应用状态。 */
   /* USER CODE END MspInit 0 */
 
   __HAL_RCC_SYSCFG_CLK_ENABLE();

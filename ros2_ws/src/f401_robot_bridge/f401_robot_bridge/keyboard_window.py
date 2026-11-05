@@ -1,4 +1,5 @@
 """Ubuntu Tk 窗口遥控；所有运动仍经过原 ROS 桥接和 STM32 保护。"""
+# 与终端版共用ROS发布/服务实现，窗口版用真实KeyPress/KeyRelease事件管理按住状态。
 import time
 
 import rclpy
@@ -9,6 +10,7 @@ from .keyboard_node import Keyboard
 
 class WindowKeyboard(Keyboard):
     def __init__(self):
+        # 复用父类的话题、服务客户端及50ms定时器；_tick在本类重写，不读取终端字符。
         super().__init__()
         self.input = HoldState(self._linear_speed, self._angular_speed)
         self.notice = '未使能：点击窗口后按 r，再按住方向键'
@@ -20,6 +22,7 @@ class WindowKeyboard(Keyboard):
         print('失焦后方向键若无响应，先点按并松开该方向键，再次按住即可。', flush=True)
 
     def _service(self, arm):
+        # 先让窗口输入归零，再复用父类异步服务；提示文字由服务Future更新。
         self.input.set_enabled(False)
         self.publish((0.0, 0.0, 0.0))
         previous = self._pending
@@ -32,6 +35,7 @@ class WindowKeyboard(Keyboard):
             generation = self._generation
 
             def show_result(future):
+                # 与父类相同，过期请求不能覆盖更新的停止状态或使能提示。
                 if generation != self._generation:
                     return
                 try:
@@ -43,6 +47,7 @@ class WindowKeyboard(Keyboard):
             self._pending.add_done_callback(show_result)
 
     def key_press(self, key):
+        # HoldState只返回动作意图，涉及ROS通信的工作留在窗口节点这一层。
         action = self.input.press(key, time.monotonic())
         if action == 'arm':
             self._service(True)
@@ -52,6 +57,7 @@ class WindowKeyboard(Keyboard):
             self.publish((0.0, 0.0, 0.0))
 
     def key_release(self, key):
+        # 松键的短暂去抖由HoldState统一处理，UI层不自行猜测是否为自动重复。
         self.input.release(key, time.monotonic())
 
     def force_stop(self, reason):
@@ -61,16 +67,19 @@ class WindowKeyboard(Keyboard):
         self.notice = reason
 
     def set_focus(self, focused):
+        # 焦点影响运动许可：切换到其他窗口后立即请求停止，回焦后不会自动续跑。
         self.input.focus(focused)
         if not focused:
             self.force_stop('窗口失焦或最小化，松开全部键后重新按r')
 
     def before_spin(self):
+        # 在ROS可能执行发布回调之前检查窗口处理间隔、键事件有效期及本次运动时限。
         reason = self.input.pump(time.monotonic())
         if reason:
             self.force_stop(reason)
 
     def _tick(self):
+        # 50ms一次，将ROS服务确认的许可同步到按键状态机，发布当前有效方向或零速。
         self.input.set_enabled(self._enabled)
         self.publish(self.input.velocity(time.monotonic()))
 
@@ -117,6 +126,7 @@ def main(args=None):
             return 'break'
 
         def close():
+            # closing使窗口关闭流程幂等，也阻止已经预约的pump继续工作。
             nonlocal closing
             if closing:
                 return
@@ -130,6 +140,8 @@ def main(args=None):
             window.quit()
 
         def pump():
+            # Tk拥有主事件循环，用非阻塞spin_once穿插处理ROS回调，避免启动第二个
+            # 阻塞事件循环。after(10, ...)是重新预约，不会在此处睡眠10ms。
             if closing:
                 return
             if not rclpy.ok():
@@ -159,6 +171,7 @@ def main(args=None):
     except tk.TclError as exc:
         raise SystemExit('无法打开控制窗口，请在Ubuntu图形桌面终端运行：' + str(exc)) from exc
     finally:
+        # 正常关窗、Ctrl-C、Tk异常均汇入清理路径，撤销输入后释放ROS和Tk资源。
         if node:
             node.input.halt()
             if rclpy.ok():

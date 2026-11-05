@@ -18,6 +18,8 @@ from robot_link.protocol import (JsonLineReader, ProtocolError, crc16, decode_js
 TOKEN = "test-fixture-" + "x" * 40
 
 
+# 用内存缓冲和条件变量模拟串口，write 收到控制帧后按测试场景产生 ACK/T 回复。
+# 测试可以故意丢回复、延迟遥测、换错 session，核对生产代码如何处理异常。
 class FakeSerial:
     def __init__(self):
         self.is_open = True
@@ -84,6 +86,7 @@ class FakeSerial:
             self._condition.notify_all()
 
 
+# 编码/解析层：检查 CRC、字段边界、JSON/TCP 分片和总超时。
 class ProtocolTests(unittest.TestCase):
     def test_crc_vector_and_bad_frame(self):
         self.assertEqual(crc16(b"123456789"), 0x29B1)
@@ -149,6 +152,7 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
 
+# 串口会话层：命令成功必须得到对应确认和有效遥测，不能只看 write 成功。
 class SerialTests(unittest.TestCase):
     def setUp(self):
         self.serial = FakeSerial()
@@ -213,6 +217,7 @@ class SerialTests(unittest.TestCase):
             self.channel.command("arm")
 
 
+# 网关层：通过 socketpair 模拟客户端连接，验证认证、请求和退出处理。
 class GatewayTests(unittest.TestCase):
     def setUp(self):
         self.serial = FakeSerial()
@@ -295,6 +300,7 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.serial.commands[-1][0], "S")
 
 
+# 客户端层：响应错误后关闭连接，避免重发可能已被固件执行过的运动请求。
 class ClientTests(unittest.TestCase):
     def test_bad_response_aborts_without_retry(self):
         fake_socket = mock.Mock()
@@ -311,6 +317,7 @@ class ClientTests(unittest.TestCase):
                 client.request("arm")
 
 
+# 回归场景：拒绝命令后的 STOP 必须顺序确认，防止清队列影响紧随其后的帧。
 class QueuedStopTests(unittest.TestCase):
     """模拟真实MCU的STOP清RX：停止确认前发第二帧，会被丢弃。"""
     def test_rejected_velocity_then_client_stop_are_serialized(self):

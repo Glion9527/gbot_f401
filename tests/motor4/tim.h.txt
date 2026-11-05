@@ -1,3 +1,5 @@
+/* 测试专用定时器模型：保留 CNT/ARR/CCR 等被真实算法访问的字段。
+ * 测试主动设置 CNT，算法更新 CCR，断言据此检查编码器和 PWM 行为。 */
 #ifndef HOST_TIM_H
 #define HOST_TIM_H
 #include "main.h"

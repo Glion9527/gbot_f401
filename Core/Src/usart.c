@@ -129,6 +129,9 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 }
 
 /* USER CODE BEGIN 1 */
+/* HAL 库定义了同名弱回调；这里的实现会替换默认空实现。
+ * 回调由 USART2 中断路径触发，不需要 main 手动反复调用。
+ * 遥控模块每次接收完成后安排下一次接收，并把解析工作留给 RemoteControl_Poll。 */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *uart)
 {
 #if ROBOT_APP_MODE == 7
@@ -138,6 +141,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *uart)
 #endif
 }
 
+/* 错误回调把丢字节/串口错误交给遥控模块记录，防止残缺命令被继续拼接执行。 */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *uart)
 {
 #if ROBOT_APP_MODE == 7

@@ -1,3 +1,4 @@
+/* 本地模式测试只需模拟 UART 发送接口，收集 robot_app 打印的运行状态。 */
 #ifndef HOST_USART_H
 #define HOST_USART_H
 #include "main.h"

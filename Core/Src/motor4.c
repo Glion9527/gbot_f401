@@ -19,6 +19,8 @@
 #error "MOTOR4_PWM_LIMIT must be in 1..1000"
 #endif
 
+/* 不随运行改变的硬件/标定表：每轮在这里绑定编码器、PWM、方向脚和控制参数。
+ * 运行状态放在Motor4Runtime和Motor4Telemetry中，避免把配置值与实时值混在一起。 */
 typedef struct {
     TIM_HandleTypeDef *encoder; /* 该轮的编码器定时器 */
     uint32_t channel;           /* TIM1中负责该轮PWM的通道 */
@@ -100,11 +102,13 @@ static void Unlock(uint32_t key)
 
 static bool ValidId(Motor4Id id)
 {
+    /* 先转无符号再比较，也能拒绝调用者传入的负轮号。 */
     return (unsigned)id < (unsigned)MOTOR4_COUNT;
 }
 
 static float Clamp(float x, float lo, float hi)
 {
+    /* 将数值夹在闭区间[lo,hi]；PI分别用它限制积分和最终输出。 */
     return x < lo ? lo : (x > hi ? hi : x);
 }
 
@@ -125,6 +129,7 @@ static bool HasFault(void)
 
 static bool AnyActive(void)
 {
+    /* “活动”按运行模式判断，不按当前PWM判断；闭环暂时输出0也仍需刷新许可。 */
     for (unsigned i = 0; i < MOTOR4_COUNT; ++i) {
         if (s_motor[i].mode != MOTOR4_MODE_STOP) return true;
     }
@@ -257,6 +262,8 @@ static float NormalizeSpeed(float rpm)
 
 static void SetSpeedState(unsigned i, float rpm)
 {
+    /* 只更新这一轮的软件目标；调用者已经完成参数、故障和换向条件的校验。
+     * 正常非零目标稍后由统一10ms控制周期采样并输出。 */
     if (rpm == 0.0f) {
         StopState(i);
         return;
@@ -278,6 +285,8 @@ static void SetSpeedState(unsigned i, float rpm)
 
 HAL_StatusTypeDef Motor4_Init(void)
 {
+    /* 初始化是上电流程的一部分；再次调用会明确停机并返回HAL_BUSY，
+     * 不把反复初始化当成清除故障或重置位置的普通运行接口。 */
     uint32_t key = Lock();
     if (s_initialized) {
         StopAllInternal();
@@ -356,6 +365,8 @@ failed:
 
 void Motor4_Stop(Motor4Id id)
 {
+    /* 只把指定轮子的目标与PWM置零，其余三轮保留原输出。
+     * 输出提交函数会根据是否还有其他轮子运行，决定共享STBY状态。 */
     if (!ValidId(id)) return;
     uint32_t key = Lock();
     if (s_initialized) {
@@ -373,6 +384,7 @@ void Motor4_Stop(Motor4Id id)
 
 void Motor4_StopAll(void)
 {
+    /* 未初始化也能拉低STBY；因此上电早期出错路径可以用此接口撤销驱动。 */
     uint32_t key = Lock();
     if (s_initialized) StopAllInternal();
     else HAL_GPIO_WritePin(STBY_PORT, STBY_PIN, GPIO_PIN_RESET);
@@ -381,6 +393,7 @@ void Motor4_StopAll(void)
 
 void Motor4_FeedWatchdog(void)
 {
+    /* 记录主循环最近确认“仍允许运行”的毫秒时刻；不改变目标转速或PWM。 */
     uint32_t key = Lock();
     if (s_initialized) s_watchdog_ms = HAL_GetTick();
     Unlock(key);
@@ -424,6 +437,8 @@ bool Motor4_SetOpenLoop(Motor4Id id, int16_t pwm)
 
 bool Motor4_SetSpeedRPM(Motor4Id id, float rpm)
 {
+    /* 请求可在主循环提交。拒绝时保持原目标，调用者需检查返回值。
+     * 零目标是停机请求，不等待下一次PI；有效非零目标由下一次PI计算输出。 */
     if (!ValidId(id) || !ValidSpeed(rpm)) return false;
     rpm = NormalizeSpeed(rpm);
     uint32_t key = Lock();
@@ -487,6 +502,8 @@ bool Motor4_SetAllSpeedsRPM(float fl, float fr, float rl, float rr)
 
 bool Motor4_ClearFaults(void)
 {
+    /* 清故障与重新使能分开：必须四路均STOP且连续静止，清除后仍保持停止。
+     * 遥控/路线应用不会在这里自动恢复故障前的目标。 */
     uint32_t key = Lock();
     bool allowed = s_initialized;
     for (unsigned i = 0; i < MOTOR4_COUNT; ++i) {
@@ -506,6 +523,8 @@ bool Motor4_ClearFaults(void)
 
 bool Motor4_GetTelemetry(Motor4Id id, Motor4Telemetry *out)
 {
+    /* 返回的是调用时刻的一份副本，out不是内部状态指针；调用者修改它不影响控制。
+     * 临界区同时避免64位position在Cortex-M4上被分两次读取时夹入中断。 */
     if (!ValidId(id) || out == NULL) return false;
     uint32_t key = Lock();
     *out = s_motor[id];

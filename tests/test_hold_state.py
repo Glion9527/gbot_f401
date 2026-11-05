@@ -7,6 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'ros2_ws/src/f401_r
 from f401_robot_bridge.hold_state import HoldState
 
 
+# 各测试传入明确的时间数值，模拟真实松键、系统重复按键和窗口事件停顿。
+# 这种“假时钟”让时间边界能稳定复现，不需要真的等待几秒或打开控制窗口。
 class HoldTests(unittest.TestCase):
     def armed(self):
         state = HoldState()
@@ -16,6 +18,7 @@ class HoldTests(unittest.TestCase):
         return state
 
     def pump_until(self, state, start, end):
+        # 模拟 GUI 定期处理事件；一旦状态机要求停止，就立即返回原因供测试断言。
         now = start
         while now < end:
             now = min(now + .01, end)

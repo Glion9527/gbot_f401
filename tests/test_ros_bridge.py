@@ -10,6 +10,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'ros2_ws/src/f401_robot_bridge'))
 
 
+# 以下替代对象仅提供节点实际访问的属性，便于在 Mac 上验证 ROS 节点逻辑。
+# 它们不实现 DDS 通信，测试结论对应回调和状态转换，而不是跨机器 ROS 发现。
 class Message:
     def __init__(self):
         self.header = NS(stamp=NS(sec=100, nanosec=0), frame_id='base_link')
@@ -46,6 +48,7 @@ class LinkError(Exception):
     pass
 
 
+# 假网络客户端记录请求并返回可控遥测，测试可切换故障/使能确认等情况。
 class Client:
     instances = []
     def __init__(self, *args, **kwargs):
@@ -75,6 +78,7 @@ class Client:
 
 
 def load_nodes():
+    # 导入真实节点前注入替代 ROS 模块；生产源码仍从 ros2_ws/src 加载。
     modules = {}
     for name in ['rclpy', 'rclpy.node', 'geometry_msgs', 'geometry_msgs.msg',
                  'sensor_msgs', 'sensor_msgs.msg', 'std_msgs', 'std_msgs.msg',
@@ -225,6 +229,7 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(node.sent['/cmd_vel'][-1].twist.linear.x, 0.0)
 
 
+# 不创建 Tk 窗口，通过替代事件和发布器验证按键状态最终是否到达 ROS 消息。
 class WindowTests(unittest.TestCase):
     """使用真实窗口节点方法和假RPC，覆盖输入状态与异步服务的衔接。"""
     def make_node(self):

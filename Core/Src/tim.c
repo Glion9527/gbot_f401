@@ -70,7 +70,10 @@ void MX_TIM1_Init(void)
   TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
 
   /* USER CODE BEGIN TIM1_Init 1 */
-
+  /* Instance 指定具体 TIM1 寄存器，Init 描述通用计数参数，sConfigOC 描述 PWM 通道。
+   * PSC=Prescaler，实际除数是 PSC+1；ARR=Period，实际一周期计数次数是 ARR+1。
+   * ClockDivision 用于定时器内部采样/滤波等时基，不应当作 PWM 计数器的 PSC。
+   * PWM 的四个 CCR 是各通道比较寄存器，由 motor4 把千分比输出换算后写入。 */
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 0;
@@ -351,7 +354,8 @@ void MX_TIM9_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM9_Init 2 */
-
+  /* 到这里仅完成定时器配置。main 在电机模块就绪后调用 Base_Start_IT，
+   * 才开始计时并允许更新中断；中断的优先级和使能在下方 MspInit 中设置。 */
   /* USER CODE END TIM9_Init 2 */
 
 }

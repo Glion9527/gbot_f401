@@ -52,7 +52,11 @@
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+/* 本文件是 CPU 的中断入口集合：外设发生事件时，CPU 暂时转到对应 Handler。
+ * Handler 把事件交给 HAL，HAL 再调用 main.c/usart.c 中重写的回调函数。
+ * 因此在主循环中找不到对这些 Handler 的普通函数调用，这是硬件触发的流程。
+ * 当前核心路径：SysTick 提供毫秒数，TIM9 提供调速节拍，USART2 接收串口字节。
+ * Fault 类入口用于处理处理器异常；普通协议错误由应用层处理，不走这些异常入口。 */
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
@@ -228,6 +232,8 @@ void USART2_IRQHandler(void)
 {
   /* USER CODE BEGIN USART2_IRQn 0 */
   /* 只接收字节和处理UART错误，命令解析留在主循环。 */
+  /* HAL 在接收满当前请求的字节数后调用 HAL_UART_RxCpltCallback，
+   * 由 usart.c 转交 RemoteControl_UART_RxCplt；中断本身不等待完整命令或网络回复。 */
   /* USER CODE END USART2_IRQn 0 */
   HAL_UART_IRQHandler(&huart2);
   /* USER CODE BEGIN USART2_IRQn 1 */

@@ -24,6 +24,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+/* 头文件声明“有哪些函数可以调用”，具体函数实现在同名 .c 中。
+ * ROBOT_APP_MODE 是编译期选择：模式 7 编入遥控入口，其余模式保留本地测试。
+ * #if 与运行时 if 不同；修改模式后需要重新编译、下载才能改变固件行为。 */
 #include "motor4.h"
 #include "mecanum.h"
 #include "robot_app.h"
@@ -94,7 +97,9 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  /* HAL_Init 建立 HAL 基础环境和 SysTick 毫秒计时；它不启动电机。
+   * 后面的 MX_xxx_Init 配置外设，Motor4_Init 和 Start_IT 才负责启动对应硬件。
+   * HAL_OK 表示初始化成功；其他返回值交给 Error_Handler 统一撤销驱动。 */
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -107,6 +112,11 @@ int main(void)
    * APB1 分频 2 后 PCLK1=42MHz，APB2 不分频所以 PCLK2=84MHz。
    * 本配置下 APB1 定时器时钟自动乘 2，APB2 定时器不再乘 2，均为 84MHz。
    * 时钟改变后，PWM 频率、控制周期和串口波特率都要重新核对。 */
+  /* 术语对应：HSI=高速内部振荡源，PLL=锁相环，VCO=PLL 内部振荡器；
+   * M/N/P 分别是输入分频、内部倍频、输出分频，336MHz 不是 CPU 频率。
+   * SYSCLK 是系统选中的主时钟；AHB/APB 是内部总线，HCLK/PCLK 是对应时钟。
+   * APB1 上的 USART2 使用 PCLK1=42MHz；定时器分支才按当前规则得到 84MHz。
+   * 这里的说明属于注释，真正设置寄存器的是 SystemClock_Config 函数。 */
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -120,6 +130,8 @@ int main(void)
   MX_TIM9_Init();
   /* USER CODE BEGIN 2 */
   /* motor4 持有四路电机状态，先完成初始化，避免定时中断读到未就绪的数据。 */
+  /* 首先保持 STBY 关闭，启动 PWM 和编码器读取能力，等待应用下发非零目标。
+   * 初始化不等于使能遥控；连接、使能和速度目标由 remote_control 分开管理。 */
   if (Motor4_Init() != HAL_OK) {
       Error_Handler();
   }
@@ -130,7 +142,8 @@ int main(void)
   if (HAL_TIM_Base_Start_IT(&htim9) != HAL_OK) {
       Error_Handler();
   }
-  /* 应用从停止状态开始，初始化按键/路线状态并输出 READY 等串口信息。 */
+  /* 应用从停止状态开始；模式7建立遥控接收状态，其余模式初始化按键/路线。
+   * 遥控的结构化T遥测和本地测试的READY文本由各自模式的主循环流程输出。 */
   RobotApp_Init();
 /* USER CODE END 2 */
 
@@ -206,6 +219,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     if (htim->Instance == TIM9) {
 #if ROBOT_APP_MODE == 7
         /* 指令超时和本地停止先于本周期PI输出，不依赖主循环是否阻塞。 */
+        /* 主循环负责接收和解析“下一条命令”，本中断独立检查“已有命令是否过期”。
+         * 若许可失效，先停止，再让 motor4 处理停止后的状态，避免继续输出旧目标。 */
         RemoteControl_Tick10ms();
 #endif
         Motor4_ControlTick10ms();
