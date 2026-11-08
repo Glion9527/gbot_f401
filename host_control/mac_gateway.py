@@ -38,7 +38,7 @@ def main():
         # 启动先验证固件协议，并明确停止；旧模式固件不会被当作遥控固件使用。
         channel.begin_session()
         print("串口握手成功，底盘未使能。配对码文件：%s" % args.token_file, flush=True)
-        print("配对码（只复制到自己的 Ubuntu）：%s" % token, flush=True)
+        # print("配对码（只复制到自己的 Ubuntu）：%s" % token, flush=True)
         # serve() 会持续监听并处理连接，直到用户退出或发生未处理异常。
         Gateway(channel, token).serve(args.bind, args.port)
     except KeyboardInterrupt:

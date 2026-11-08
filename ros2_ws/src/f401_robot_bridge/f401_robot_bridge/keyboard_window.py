@@ -1,25 +1,26 @@
 """Ubuntu Tk 窗口遥控；所有运动仍经过原 ROS 桥接和 STM32 保护。"""
-# 与终端版共用ROS发布/服务实现，窗口版用真实KeyPress/KeyRelease事件管理按住状态。
+# 与终端版共用ROS发布/服务实现，窗口版用按下和松开事件识别每次点按。
 import time
 
 import rclpy
 
 from .hold_state import HoldState
-from .keyboard_node import Keyboard
+from .keyboard_node import KeyboardNode
 
 
-class WindowKeyboard(Keyboard):
+class WindowKeyboard(KeyboardNode):
     def __init__(self):
         # 复用父类的话题、服务客户端及50ms定时器；_tick在本类重写，不读取终端字符。
         super().__init__()
         self.input = HoldState(self._linear_speed, self._angular_speed)
-        self.notice = '未使能：点击窗口后按 r，再按住方向键'
+        self.notice = '点击窗口后按 r 使能，再点按方向键'
+        self._print_controls()
 
     def _print_controls(self):
-        print('窗口遥控：r使能；按住W/S前后、A/D横移、Q/E旋转；松键归零；空格停止。', flush=True)
-        print('单次控制从首次运动起最多5秒；失焦、窗口停顿或键事件超时均解除使能。', flush=True)
+        print('点按调档：W/X 前后、A/D 横移、Q/E 转向。S 停车，空格解除使能。', flush=True)
+        print('松键保持目标速度。失焦或窗口卡顿会解除使能。', flush=True)
         print('失焦后若r无响应，先松开全部键，再点按并松开r一次，随后重新按r。', flush=True)
-        print('失焦后方向键若无响应，先点按并松开该方向键，再次按住即可。', flush=True)
+        print('失焦后方向键若无响应，先点按并松开该键，再按一次调档。', flush=True)
 
     def _service(self, arm):
         # 先让窗口输入归零，再复用父类异步服务；提示文字由服务Future更新。
@@ -47,7 +48,8 @@ class WindowKeyboard(Keyboard):
             self._pending.add_done_callback(show_result)
 
     def key_press(self, key):
-        # HoldState只返回动作意图，涉及ROS通信的工作留在窗口节点这一层。
+        # 使能回复可能刚到达，在首个周期发布前也应识别新的点按。
+        self.input.set_enabled(self._enabled)
         action = self.input.press(key, time.monotonic())
         if action == 'arm':
             self._service(True)
@@ -73,13 +75,13 @@ class WindowKeyboard(Keyboard):
             self.force_stop('窗口失焦或最小化，松开全部键后重新按r')
 
     def before_spin(self):
-        # 在ROS可能执行发布回调之前检查窗口处理间隔、键事件有效期及本次运动时限。
+        # 在ROS可能执行发布回调之前检查窗口处理间隔。
         reason = self.input.pump(time.monotonic())
         if reason:
             self.force_stop(reason)
 
     def _tick(self):
-        # 50ms一次，将ROS服务确认的许可同步到按键状态机，发布当前有效方向或零速。
+        # 50ms一次，发布已设定的档位速度或零速。
         self.input.set_enabled(self._enabled)
         self.publish(self.input.velocity(time.monotonic()))
 
@@ -98,15 +100,15 @@ def main(args=None):
     try:
         window = tk.Tk()
         window.title('F401 小车键盘控制')
-        window.geometry('560x290')
-        window.minsize(460, 260)
+        window.geometry('560x310')
+        window.minsize(460, 280)
         node = WindowKeyboard()
         frame = ttk.Frame(window, padding=18)
         frame.pack(fill='both', expand=True)
         labels = []
-        for text in ('r 使能 · 空格停止并解除使能',
-                     '按住 W/S 前后 · A/D 横移 · Q/E 左右转\n松开方向键归零；同时按多个方向会归零',
-                     '单次控制最多 5 秒，届时需松键并重新按 r\n失焦、最小化、窗口卡顿或 1 秒无键事件会停止\n失焦后方向键若无响应，先点按松开一次再按住'):
+        for text in ('r 使能 · S 停车 · 空格停车并解除使能',
+                     'W/X 前后 ±1 档 · A/D 横移 ±1 档 · Q/E 转向 ±1 档\n每次点按调一档，松开保持目标速度。',
+                     '失焦或最小化会停止。\n轮子需要换向时，按 S 等停稳后再调档。'):
             label = ttk.Label(frame, text=text, wraplength=500)
             label.pack(anchor='w', pady=(0, 10))
             labels.append(label)
@@ -151,7 +153,10 @@ def main(args=None):
             node.before_spin()
             rclpy.spin_once(node, timeout_sec=0.0)
             permission = '输入已使能' if node._enabled else '输入未使能'
-            status.set(permission + '；' + node.notice)
+            forward, left, turn = node.input.velocity(time.monotonic())
+            status.set(f'{permission} · {node.notice}\n'
+                       f'目标  前后 {forward:+.2f} m/s  横移 {left:+.2f} m/s  '
+                       f'转向 {turn:+.2f} rad/s')
             window.after(10, pump)
 
         window.bind('<KeyPress>', press)

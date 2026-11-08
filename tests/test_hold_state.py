@@ -27,26 +27,29 @@ class HoldTests(unittest.TestCase):
                 return result
         return None
 
-    def test_press_hold_without_first_repeat_pause(self):
-        state = self.armed()
-        state.press('w', .01)
-        self.assertEqual(state.velocity(.02), (.08, 0., 0.))
-        self.assertIsNone(self.pump_until(state, .01, .7))
-        self.assertEqual(state.velocity(.7), (.08, 0., 0.))
+    def tap(self, state, key, now):
+        state.press(key, now)
+        state.release(key, now + .005)
+        return state.velocity(now + .025)
 
-    def test_true_release_zeroes_after_short_filter(self):
+    def test_tap_latches_velocity_after_release_without_key_events(self):
+        state = self.armed()
+        self.assertEqual(self.tap(state, 'w', .01), (.08, 0., 0.))
+        self.assertIsNone(self.pump_until(state, .04, 1.5))
+        self.assertEqual(state.velocity(1.5), (.08, 0., 0.))
+
+    def test_each_confirmed_press_changes_one_step(self):
         state = self.armed()
         state.press('w', .01)
+        state.press('w', .09)
         state.release('w', .1)
-        self.assertEqual(state.velocity(.11), (.08, 0., 0.))
-        self.assertEqual(state.velocity(.116), (0., 0., 0.))
+        state.press('w', .101)
+        self.assertEqual(state.velocity(.12), (.08, 0., 0.))
+        state.release('w', .13)
+        self.assertEqual(self.tap(state, 'w', .16), (.10, 0., 0.))
 
-    def test_autorepeat_release_press_does_not_pause_or_rearm(self):
+    def test_autorepeat_cannot_rearm(self):
         state = self.armed()
-        state.press('w', .01)
-        state.release('w', .5)
-        self.assertIsNone(state.press('w', .501))
-        self.assertEqual(state.velocity(.52), (.08, 0., 0.))
         state.halt()
         self.assertEqual(state.press('r', .6), 'arm')
         state.release('r', .7)
@@ -66,17 +69,50 @@ class HoldTests(unittest.TestCase):
         state.press('w', .06)
         self.assertEqual(state.velocity(.07), (.08, 0., 0.))
 
-    def test_conflicting_directions_do_not_resume_old_direction(self):
+    def test_signed_steps_clamp_and_pass_through_zero(self):
+        for axis, (positive, negative, steps) in enumerate((
+            ('w', 'x', (.08, .10, .12, .14, .15)),
+            ('a', 'd', (.08, .10, .12, .14, .15)),
+            ('q', 'e', (.25, .35, .45, .55, .60)),
+        )):
+            with self.subTest(axis=axis):
+                state = self.armed()
+                presses = [
+                    *((positive, speed) for speed in (*steps, steps[-1])),
+                    *((negative, speed) for speed in reversed(steps[:-1])),
+                    (negative, 0.),
+                    *((negative, -speed) for speed in (*steps, steps[-1])),
+                    (positive, -steps[-2]),
+                ]
+                for index, (key, expected) in enumerate(presses, 1):
+                    velocity = self.tap(state, key, index * .04)
+                    self.assertAlmostEqual(velocity[axis], expected)
+                    self.assertTrue(all(value == 0. for other, value in enumerate(velocity)
+                                        if other != axis))
+
+    def test_mixed_axes_and_zero_keys_stay_armed(self):
         state = self.armed()
-        state.press('w', .01)
-        state.press('s', .02)
-        self.assertEqual(state.velocity(.03), (0., 0., 0.))
-        state.release('s', .04)
+        self.assertEqual(self.tap(state, 'w', .01), (.08, 0., 0.))
+        self.assertEqual(self.tap(state, 'a', .05), (.08, .08, 0.))
+        self.assertEqual(self.tap(state, 'e', .09), (.08, .08, -.25))
+        self.assertEqual(self.tap(state, 's', .13), (0., 0., 0.))
+        self.assertTrue(state.enabled)
+        self.assertEqual(self.tap(state, 'x', .17), (-.08, 0., 0.))
+        self.assertEqual(self.tap(state, '0', .21), (0., 0., 0.))
+        self.assertTrue(state.enabled)
+
+    def test_stop_and_rearm_discard_latched_target(self):
+        state = self.armed()
+        self.assertEqual(self.tap(state, 'w', .01), (.08, 0., 0.))
+        self.assertEqual(state.press('space', .05), 'stop')
+        self.assertFalse(state.enabled)
         self.assertEqual(state.velocity(.06), (0., 0., 0.))
-        state.release('w', .07)
-        state.velocity(.09)
-        state.press('a', .1)
-        self.assertEqual(state.velocity(.11), (0., .08, 0.))
+        state.release('space', .07)
+        self.assertEqual(state.press('r', .10), 'arm')
+        state.release('r', .11)
+        state.set_enabled(True)
+        self.assertEqual(state.velocity(.13), (0., 0., 0.))
+        self.assertEqual(self.tap(state, 'w', .15), (.08, 0., 0.))
 
     def test_focus_loss_and_stop_do_not_auto_resume(self):
         state = self.armed()
@@ -153,50 +189,30 @@ class HoldTests(unittest.TestCase):
         self.assertEqual(state.velocity(.3), (0., 0., 0.))
         self.assertIsNone(state.press('w', .31))
 
-    def test_missing_key_events_expires_lease(self):
+    def test_repeat_events_do_not_change_latched_speed_or_prevent_stop(self):
         state = self.armed()
         state.press('w', .01)
-        self.assertIn('键事件', self.pump_until(state, 0., 1.02))
-        self.assertFalse(state.enabled)
-        self.assertEqual(state.velocity(1.03), (0., 0., 0.))
-
-    def test_repeat_events_cannot_extend_five_second_limit(self):
-        state = self.armed()
-        state.press('w', .01)
-        now = 0.
-        reason = None
-        while now < 5.1:
-            now = round(now + .01, 4)
+        for index in range(1, 611):
+            now = index / 100
             state.press('w', now)
-            reason = state.pump(now)
-            if reason:
-                break
-        self.assertIn('5秒', reason)
-        self.assertLessEqual(now, 5.02)
+            self.assertIsNone(state.pump(now))
+        self.assertTrue(state.enabled)
+        self.assertEqual(state.velocity(6.10), (.08, 0., 0.))
+        self.assertEqual(state.press('space', 6.11), 'stop')
         self.assertFalse(state.enabled)
-        self.assertIsNone(state.press('w', now + .01))
-        self.assertEqual(state.velocity(now + .02), (0., 0., 0.))
+        self.assertEqual(state.velocity(6.12), (0., 0., 0.))
 
-    def test_zero_and_direction_change_do_not_reset_absolute_limit(self):
+    def test_zero_and_direction_change_work_after_extended_motion(self):
         state = self.armed()
-        previous = 0.
-        for now, operation, key in [(.01, 'press', 'w'), (.1, 'release', 'w'),
-                                    (.2, 'press', '0'), (.3, 'release', '0'),
-                                    (.4, 'press', 'a')]:
-            self.assertIsNone(self.pump_until(state, previous, now))
-            getattr(state, operation)(key, now)
-            previous = now
-        self.assertEqual(state.velocity(.41), (0., .08, 0.))
-        now = .4
-        reason = None
-        while now < 5.02:
-            now = round(now + .01, 4)
-            state.press('a', now)
-            reason = state.pump(now)
-            if reason:
-                break
-        self.assertIn('5秒', reason)
-        self.assertFalse(state.enabled)
+        self.assertEqual(self.tap(state, 'w', .01), (.08, 0., 0.))
+        self.assertIsNone(self.pump_until(state, .04, 6.0))
+        self.assertEqual(state.velocity(6.0), (.08, 0., 0.))
+        self.assertEqual(self.tap(state, '0', 6.01), (0., 0., 0.))
+        self.assertTrue(state.enabled)
+        self.assertEqual(self.tap(state, 'a', 6.05), (0., .08, 0.))
+        self.assertIsNone(self.pump_until(state, 6.08, 12.0))
+        self.assertTrue(state.enabled)
+        self.assertEqual(state.velocity(12.0), (0., .08, 0.))
 
 
 if __name__ == '__main__':

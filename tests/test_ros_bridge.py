@@ -200,6 +200,8 @@ class NodeTests(unittest.TestCase):
         node = keyboard.Keyboard()
         node._arm.call_async = node._stop.call_async = call
         node._service(True)
+        node._service(True)
+        self.assertEqual(len(futures), 1)
         node._service(False)
         self.assertEqual(len(futures), 2)
         futures[0].callback(futures[0])
@@ -215,18 +217,60 @@ class NodeTests(unittest.TestCase):
         self.assertIn('无编码器反馈', node.sent['/robot/state'][-1].data)
         self.assertFalse(node._state.armed)
 
-    def test_terminal_keyboard_uses_verified_speed_and_keeps_timeout(self):
+    def tick_keyboard(self, node, now, keys=b''):
+        ready = [0] if keys else []
+        messages = node.sent['/cmd_vel']
+        before = len(messages)
+        with patch.object(keyboard.select, 'select', return_value=(ready, [], [])), \
+             patch.object(keyboard.sys, 'stdin', NS(fileno=lambda: 0)), \
+             patch.object(keyboard.os, 'read', return_value=keys), \
+             patch.object(keyboard.termios, 'tcflush'), \
+             patch.object(keyboard.time, 'monotonic', return_value=now):
+            node._tick()
+        self.assertGreater(len(messages), before)
+        twist = messages[-1].twist
+        return twist.linear.x, twist.linear.y, twist.angular.z
+
+    def test_terminal_latches_and_changes_gears_after_extended_motion(self):
         node = keyboard.Keyboard()
         node._enabled = True
-        with patch.object(keyboard.select, 'select', return_value=([None], [], [])), \
-             patch.object(keyboard.os, 'read', return_value=b'w'), \
-             patch.object(keyboard.time, 'monotonic', return_value=1.0):
-            node._tick()
-        self.assertEqual(node.sent['/cmd_vel'][-1].twist.linear.x, .08)
-        with patch.object(keyboard.select, 'select', return_value=([], [], [])), \
-             patch.object(keyboard.time, 'monotonic', return_value=1.3):
-            node._tick()
-        self.assertEqual(node.sent['/cmd_vel'][-1].twist.linear.x, 0.0)
+        self.assertEqual(self.tick_keyboard(node, 1.0, b'w'), (.08, 0., 0.))
+        # 控制周期一直正常运行，6 秒没输入也持续发布首档速度。
+        for index in range(11, 71):
+            self.assertEqual(self.tick_keyboard(node, index / 10), (.08, 0., 0.))
+        self.assertEqual(self.tick_keyboard(node, 7.05, b'wwaQ'), (.12, .08, .25))
+        self.assertEqual(self.tick_keyboard(node, 7.10, b'xdE'), (.10, 0., 0.))
+        self.assertEqual(self.tick_keyboard(node, 7.15, b'X'), (.08, 0., 0.))
+        self.assertEqual(self.tick_keyboard(node, 7.20, b'wsx'), (0., 0., 0.))
+        self.assertTrue(node._enabled)
+
+    def test_terminal_input_ignores_paste_and_function_keys(self):
+        terminal = keyboard.TerminalInput()
+        self.assertEqual(terminal.feed(b'\x1b[20'), [])
+        self.assertEqual(terminal.feed(b'0~rwsa \x1b[201'), [])
+        self.assertEqual(terminal.feed(b'~\x1b[1;2D\x1bOQw'), ['w'])
+        self.assertEqual(terminal.feed(b'\x1b'), [])
+        self.assertEqual(terminal.feed(b'S'), ['s'])
+
+    def test_terminal_stop_conditions_preempt_motion(self):
+        scenarios = {
+            'fragmented_focus_loss': [(1.05, b'\x1b['), (1.10, b'Ow')],
+            'tick_gap': [(1.25, b'w')],
+            'space': [(1.05, b'ww q')],
+        }
+        for scenario, events in scenarios.items():
+            with self.subTest(scenario=scenario):
+                node = keyboard.Keyboard()
+                node._enabled = True
+                future = NS(add_done_callback=lambda callback: None)
+                with patch.object(node._stop, 'call_async', create=True, return_value=future) as stop:
+                    self.assertEqual(self.tick_keyboard(node, 1.0, b'w'), (.08, 0., 0.))
+                    for now, keys in events[:-1]:
+                        self.assertEqual(self.tick_keyboard(node, now, keys), (.08, 0., 0.))
+                    self.assertEqual(self.tick_keyboard(node, *events[-1]), (0., 0., 0.))
+                    stop.assert_called_once()
+                    self.assertFalse(node._enabled)
+                    self.assertEqual(self.tick_keyboard(node, events[-1][0] + .05, b'w'), (0., 0., 0.))
 
 
 # 不创建 Tk 窗口，通过替代事件和发布器验证按键状态最终是否到达 ROS 消息。
@@ -273,7 +317,7 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(node._enabled)
         self.assertEqual(node.sent['/cmd_vel'][-1].twist.linear.x, 0.0)
 
-    def test_hold_and_release_reach_stamped_publisher(self):
+    def test_latched_steps_and_zero_reach_stamped_publisher(self):
         node, futures = self.make_node()
         with patch.object(keyboard_window.time, 'monotonic', return_value=0.0):
             node.key_press('r')
@@ -283,18 +327,26 @@ class WindowTests(unittest.TestCase):
             node.before_spin()
             node._tick()
             node.key_press('w')
-        # 模拟每10ms泵运行，首次OS自动重复前仍持续发送速度。
-        for index in range(3, 71):
+            node.key_release('w')
+        # 松键后超过原来的 5 秒时限，窗口仍定期发布锁定的目标速度。
+        for index in range(3, 620, 5):
             with patch.object(keyboard_window.time, 'monotonic', return_value=index / 100):
                 node.before_spin()
                 node._tick()
-        self.assertEqual(node.sent['/cmd_vel'][-1].twist.linear.x, .08)
-        with patch.object(keyboard_window.time, 'monotonic', return_value=.71):
-            node.key_release('w')
-        with patch.object(keyboard_window.time, 'monotonic', return_value=.73):
+        message = node.sent['/cmd_vel'][-1]
+        self.assertEqual(message.twist.linear.x, .08)
+        self.assertEqual(message.header.frame_id, 'base_link')
+        self.assertEqual(message.header.stamp.sec, 100)
+        with patch.object(keyboard_window.time, 'monotonic', return_value=6.21):
             node.before_spin()
+            node.key_press('w')
             node._tick()
+        self.assertEqual(node.sent['/cmd_vel'][-1].twist.linear.x, .10)
+        with patch.object(keyboard_window.time, 'monotonic', return_value=6.24):
+            node.key_press('s')
         self.assertEqual(node.sent['/cmd_vel'][-1].twist.linear.x, 0.0)
+        self.assertTrue(node._enabled)
+        self.assertEqual(len(futures), 1)
 
     def test_event_pump_gap_cancels_pending_arm_before_publish(self):
         node, futures = self.make_node()
