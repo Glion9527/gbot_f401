@@ -16,17 +16,19 @@ from robot_link.client import RobotClient, RobotLinkError, add_client_arguments,
 def main():
     parser = argparse.ArgumentParser(description="低速点按遥控：r 使能，W/S 前后，A/D 横移，Q/E 左右转，0 零速，空格停止解除使能")
     add_client_arguments(parser)
-    parser.add_argument("--speed", type=int, default=80, help="平移速度 mm/s，默认80，上限150")
+    parser.add_argument("--speed", type=int, default=80, help="前后速度 mm/s，默认80，上限300；横移仍限150")
     parser.add_argument("--turn", type=int, default=250, help="转向角速度 mrad/s，默认250，上限600")
     args = parser.parse_args()
-    if not 1 <= args.speed <= 150 or not 1 <= args.turn <= 600:
-        parser.error("speed 需为1..150，turn需为1..600")
+    if not 1 <= args.speed <= 300 or not 1 <= args.turn <= 600:
+        parser.error("speed 需为1..300，turn需为1..600")
     if not sys.stdin.isatty():
         parser.error("请在有键盘输入的交互终端中运行")
     # 每个元组依次为：前进速度 mm/s、向左速度 mm/s、逆时针角速度 mrad/s。
     # 按键只选择一种运动分量；此终端版不把同时按下的多个方向键合成为斜向运动。
+    # 直行可用到300mm/s，横移仍按网关/固件的150mm/s上限截断。
+    strafe = min(args.speed, 150)
     directions = {"w": (args.speed, 0, 0), "s": (-args.speed, 0, 0),
-                  "a": (0, args.speed, 0), "d": (0, -args.speed, 0),
+                  "a": (0, strafe, 0), "d": (0, -strafe, 0),
                   "q": (0, 0, args.turn), "e": (0, 0, -args.turn)}
     client, original = None, None
     try:

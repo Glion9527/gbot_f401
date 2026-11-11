@@ -23,8 +23,9 @@
 #define COMMAND_TIMEOUT_MS 300U
 #define ARM_QUIET_MS       250U
 #define TELEMETRY_MS       100U
-/* 遥控模式的独立轮速目标上限；不同于 motor4.h 中底层允许的最大轮速。 */
-#define REMOTE_MAX_RPM     60.0f
+/* 遥控模式的独立轮速目标上限；不同于 motor4.h 中底层允许的最大轮速。
+ * 直行上限 300mm/s（0.3m/s）对应约 71.6RPM，这里取 75RPM 留出余量。 */
+#define REMOTE_MAX_RPM     75.0f
 
 /* 单生产者（USART2 IRQ）/单消费者（主循环）缓冲；时间戳防止积压旧帧
  * 在主循环恢复后被当成刚收到的新运动指令。所有共享状态均用短临界区保护。 */
@@ -149,7 +150,7 @@ static bool ParseU32(const char *text, uint32_t *out)
 static bool ParseAxis(const char *text, int32_t limit, int32_t *out)
 {
     /* 速度允许负号；先读受限的无符号幅值，再加符号，避免越界整数参与控制。
-     * vx/vy 的 limit=150（mm/s），wz 的 limit=600（mrad/s）。 */
+     * vx 的 limit=300（mm/s，直行 0.3m/s），vy 的 limit=150，wz 的 limit=600（mrad/s）。 */
     bool negative = *text == '-';
     if (negative) ++text;
     uint32_t magnitude;
@@ -167,7 +168,7 @@ static bool NewSequence(uint32_t seq)
 }
 
 /* 一次校验四轮估算峰值，再按同一比例降低整个车身指令，保持方向/曲率。
- * 限制的是轮速目标，不是硬件电流；60RPM 是此阶段遥控的调速上限。 */
+ * 限制的是轮速目标，不是硬件电流；75RPM 是此阶段遥控的调速上限。 */
 static bool SetBodyVelocity(int32_t vx, int32_t vy, int32_t wz)
 {
     /* 尺寸宏原单位为mm：直径/完整轮距要同时“除2取半值、除1000换成米”。
@@ -181,7 +182,7 @@ static bool SetBodyVelocity(int32_t vx, int32_t vy, int32_t wz)
     const float rpm_factor = 60.0f / (2.0f * 3.14159265358979323846f * radius);
     float rotation = (half_l + half_w) * t;
     /* 此时四轮数组是轮缘线速度（m/s），再乘 rpm_factor 才是输出轴RPM。
-     * 在交给 mecanum 前再做遥控阶段的60RPM上限，四轮始终等比例缩放。 */
+     * 在交给 mecanum 前再做遥控阶段的75RPM上限，四轮始终等比例缩放。 */
     float wheel[4] = { f-l-rotation, f+l+rotation, f+l-rotation, f-l+rotation };
     float peak = 0.0f;
     for (unsigned i = 0; i < MOTOR4_COUNT; ++i) {
@@ -264,7 +265,7 @@ static void Execute(char *payload, uint32_t generation)
             /* 唯一剩余类型为V：三个轴依次为前进、左移、俯视逆时针角速度。
              * 解析、许可、时效、四轮命令接受条件必须全部通过，才刷新valid_at。 */
             int32_t vx, vy, wz;
-            if (!ParseAxis(part[3], 150, &vx) || !ParseAxis(part[4], 150, &vy) ||
+            if (!ParseAxis(part[3], 300, &vx) || !ParseAxis(part[4], 150, &vy) ||
                 !ParseAxis(part[5], 600, &wz)) {
                 DisarmLocked();
                 result = "INVALID";

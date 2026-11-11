@@ -164,7 +164,7 @@ def velocity_fields(message):
     # 固定返回 vx、vy、wz 顺序，恰好对应串口 V 命令的三个位置参数。
     # 单位分别为 mm/s、mm/s、mrad/s；这里沿用上层已换算好的整数值，不乘除1000。
     output = []
-    for key, limit in (("vx_mm_s", 150), ("vy_mm_s", 150), ("wz_mrad_s", 600)):
+    for key, limit in (("vx_mm_s", 300), ("vy_mm_s", 150), ("wz_mrad_s", 600)):
         value = message.get(key)
         # bool 是 int 的子类，这里明确拒绝 true/false 作为速度。
         if type(value) is not int or abs(value) > limit:

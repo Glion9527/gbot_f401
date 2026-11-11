@@ -4,7 +4,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'ros2_ws/src/f401_robot_bridge'))
-from f401_robot_bridge.hold_state import HoldState
+from f401_robot_bridge.hold_state import HoldState, SpeedGears
 
 
 # 各测试传入明确的时间数值，模拟真实松键、系统重复按键和窗口事件停顿。
@@ -89,6 +89,18 @@ class HoldTests(unittest.TestCase):
                     self.assertAlmostEqual(velocity[axis], expected)
                     self.assertTrue(all(value == 0. for other, value in enumerate(velocity)
                                         if other != axis))
+
+    def test_high_linear_speed_climbs_and_caps_strafe(self):
+        # linear_speed=0.30 只抬高前后最高档：从 0.08 起每档 0.02m/s 升到 0.30，
+        # 横移仍限制在遥控协议的 0.15m/s 以内，避免网关拒绝速度消息。
+        forward, strafe, _ = SpeedGears(.30, .25)._speeds
+        self.assertEqual(tuple(round(level, 2) for level in forward),
+                         (0., .08, .10, .12, .14, .16, .18, .20, .22, .24, .26, .28, .30))
+        self.assertTrue(all(round(level * 1000) <= 300 for level in forward))
+        self.assertTrue(all(round(level * 1000) <= 150 for level in strafe))
+        # 默认 0.08 仍保持原来的前后五档区间。
+        self.assertEqual(SpeedGears(.08, .25)._speeds[0],
+                         (0., .08, .10, .12, .14, .15))
 
     def test_mixed_axes_and_zero_keys_stay_armed(self):
         state = self.armed()

@@ -40,7 +40,7 @@ class CommandState:
         self._received = None
         if (frame not in ('', 'base_link') or
                 not all(math.isfinite(v) for v in (vx, vy, wz, now, stamp_age)) or
-                abs(vx) > 0.15 or abs(vy) > 0.15 or abs(wz) > 0.6 or
+                abs(vx) > 0.3 or abs(vy) > 0.15 or abs(wz) > 0.6 or
                 stamp_age < -0.1 or stamp_age >= self.timeout):
             return False
         if self.armed:

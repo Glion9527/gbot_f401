@@ -13,7 +13,7 @@
 | `V,session,seq,vx,vy,wz` | vx/vy 单位 mm/s，wz 单位 mrad/s；均为车身坐标，前、左、俯视逆时针为正 |
 | `S,session,seq` | 停止且解除使能；下一次运动需重新 A |
 
-H 使用非零 session；其余命令必须匹配当前 session，seq 必须比上次已消费序号新（uint32 回绕比较）。结构正确且序号新的命令消费序号，即使因状态被拒绝也不允许重播。V 的轴向输入限制为 abs(vx),abs(vy)<=150，abs(wz)<=600。固件再对四轮目标等比例限幅到 60RPM；几何参数沿用 D=80mm、L=185mm、W=220mm。非零 V 仅在已使能时接受；零 V 停止但保持使能。换向若不满足 motor4 的停止/静止条件，停止、解除使能并返回 REJECTED，不自动排队换向。
+H 使用非零 session；其余命令必须匹配当前 session，seq 必须比上次已消费序号新（uint32 回绕比较）。结构正确且序号新的命令消费序号，即使因状态被拒绝也不允许重播。V 的轴向输入限制为 abs(vx)<=300，abs(vy)<=150，abs(wz)<=600。固件再对四轮目标等比例限幅到 75RPM（直行 300mm/s 对应约 71.6RPM，不触发限幅）；几何参数沿用 D=80mm、L=185mm、W=220mm。非零 V 仅在已使能时接受；零 V 停止但保持使能。换向若不满足 motor4 的停止/静止条件，停止、解除使能并返回 REJECTED，不自动排队换向。
 
 ACK payload 为 `ACK,session,seq,result`，result 取 `OK`、`DISARMED`、`BUSY`、`FAULT`、`REJECTED`、`INVALID`。没有可验证 session/seq 的坏帧不需回复。CRC 错误、接收溢出/串口错误/过长帧在使能状态下停止并解除使能，不刷新运动许可。不得将半帧跨超时重新拼成运动指令。
 

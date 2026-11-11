@@ -272,7 +272,7 @@ static void test_crc_fragmentation_and_frames(void)
 static void test_strict_numbers_and_limits(void)
 {
     static const char *const bad[] = {
-        "V,17,3,151,0,0", "V,17,3,0,-151,0", "V,17,3,0,0,601",
+        "V,17,3,301,0,0", "V,17,3,0,-151,0", "V,17,3,0,0,601",
         "V,17,3,nan,0,0", "V,17,3,1.0,0,0", "V,17,3, 1,0,0",
         "V,17,3,+1,0,0", "V,17,3,1x,0,0", "V,17,3,1,0,0,9",
         "V,17,3,1,0", "V,17,3,999999999999999999999,0,0",
@@ -286,16 +286,16 @@ static void test_strict_numbers_and_limits(void)
     }
     fresh(); connect_and_arm();
     send("V,17,2,-150,0,-600"); expect_ack(17,2,"OK");
-    for (unsigned i=0;i<4;++i) assert(fabsf(view(i).target_rpm)<=60.001f);
+    for (unsigned i=0;i<4;++i) assert(fabsf(view(i).target_rpm)<=75.001f);
     done("strict decimal grammar and numeric/field bounds reject malformed motor commands");
 }
 
 /* 车身整数速度进入真实麦轮公式，检查几何换算和遥控层的轮速限幅。 */
 static void test_kinematics_and_cap(void)
 {
-    const int inputs[][3]={{50,0,0},{0,50,0},{0,0,250},{150,150,600}};
+    const int inputs[][3]={{50,0,0},{0,50,0},{0,0,250},{150,150,600},{300,0,0}};
     const double factor=60.0/(2.0*3.14159265358979323846*0.04);
-    for (unsigned test=0;test<4;++test) {
+    for (unsigned test=0;test<5;++test) {
         fresh(); connect_and_arm();
         char payload[128];
         (void)snprintf(payload,sizeof(payload),"V,17,2,%d,%d,%d",inputs[test][0],inputs[test][1],inputs[test][2]);
@@ -306,10 +306,10 @@ static void test_kinematics_and_cap(void)
         double wanted[4]={(x-y-z)*factor,(x+y+z)*factor,(x+y-z)*factor,(x-y+z)*factor};
         double peak=0;
         for (unsigned i=0;i<4;++i) if(fabs(wanted[i])>peak) peak=fabs(wanted[i]);
-        double scale=peak>60.0?60.0/peak:1.0;
+        double scale=peak>75.0?75.0/peak:1.0;
         for (unsigned i=0;i<4;++i) {
             assert(fabs((double)view(i).target_rpm-wanted[i]*scale)<0.002);
-            assert(fabsf(view(i).target_rpm)<=60.001f);
+            assert(fabsf(view(i).target_rpm)<=75.001f);
         }
         advance(10,true,true);
         /* Physical A/B/C/D outputs correspond to FL/RL/RR/FR. */
@@ -322,7 +322,7 @@ static void test_kinematics_and_cap(void)
             if (view(logical).pwm!=0) assert(pair==(hardware_sign*drives[logical]>0?1U:2U));
         }
     }
-    done("body units and X-mecanum geometry, FL/FR/RL/RR mapping and equal 60RPM cap");
+    done("body units and X-mecanum geometry, FL/FR/RL/RR mapping and equal 75RPM cap");
 }
 
 /* 新会话隔离旧指令，seq 防重放，并验证 uint32 回绕附近的新旧比较。 */

@@ -8,21 +8,30 @@ class SpeedGears:
                   'q': (2, 1), 'e': (2, -1)}
 
     def __init__(self, linear_speed, angular_speed):
-        if not (0 < linear_speed <= 0.15 and 0 < angular_speed <= 0.60):
-            raise ValueError('linear_speed需在(0,.15]，angular_speed在(0,.6]')
-        linear_levels = self._levels(linear_speed, 0.02, 0.15)
-        self._speeds = (linear_levels, linear_levels, self._levels(angular_speed, 0.10, 0.60))
+        if not (0 < linear_speed <= 0.30 and 0 < angular_speed <= 0.60):
+            raise ValueError('linear_speed需在(0,.3]，angular_speed在(0,.6]')
+        if linear_speed > 0.15:
+            # 大于原上限时按“最高档”理解：从已验证的 0.08 起步，每档 0.02m/s
+            # 升到该值；横移仍按 0.08~0.15 的五档。
+            forward = self._ladder(0.08, 0.02, linear_speed)
+            strafe = self._ladder(0.08, 0.02, 0.15)
+        else:
+            # 保持原语义：linear_speed 就是起步档，档位按 0.02m/s 递增到 0.15。
+            forward = strafe = self._ladder(linear_speed, 0.02, 0.15)
+        self._speeds = (forward, strafe, self._ladder(angular_speed, 0.10, 0.60))
         self.clear()
 
     @staticmethod
-    def _levels(start, step, limit):
-        # 第一档沿用已验证的起步速度，之后最多加四档，最后一档可受上限截断。
-        levels = [0.0, start]
-        for index in range(1, 5):
-            speed = min(limit, round(start + step * index, 12))
+    def _ladder(start, step, limit):
+        # 第一档沿用已验证的起步速度，之后按 step 递增，末尾不足一步时补上限本身。
+        levels = [0.0]
+        index = 0
+        while True:
+            speed = min(limit, round(start + step * index, 10))
             if speed <= levels[-1]:
                 break
             levels.append(speed)
+            index += 1
         return tuple(levels)
 
     def clear(self):

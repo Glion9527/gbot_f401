@@ -33,7 +33,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(s.velocity(10.06), (0, 0, 0))
 
     def test_invalid_target_clears_previous(self):
-        for kwargs in [dict(vx=math.nan), dict(vx=math.inf), dict(vx=.151),
+        for kwargs in [dict(vx=math.nan), dict(vx=math.inf), dict(vx=.301),
                        dict(vy=-.151), dict(wz=.601), dict(stamp_age=.25),
                        dict(stamp_age=-.101), dict(frame='map')]:
             with self.subTest(kwargs=kwargs):

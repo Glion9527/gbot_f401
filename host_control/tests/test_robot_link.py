@@ -112,7 +112,7 @@ class ProtocolTests(unittest.TestCase):
                      b"[" * 2000 + b"]" * 2000):
             with self.assertRaises(ProtocolError):
                 decode_json(data)
-        for value in (True, 1.5, "2", 151):
+        for value in (True, 1.5, "2", 301):
             with self.assertRaises(ProtocolError):
                 velocity_fields({"vx_mm_s": value, "vy_mm_s": 0, "wz_mrad_s": 0})
 

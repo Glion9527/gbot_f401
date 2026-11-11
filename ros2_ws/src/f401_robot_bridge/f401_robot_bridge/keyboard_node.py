@@ -20,6 +20,7 @@ class KeyboardNode(Node):
     def __init__(self):
         super().__init__('f401_keyboard')
         # .08m/s 是当前底盘已验证能启动的初测速度，角速度单位为 rad/s。
+        # linear_speed 大于 0.15 时按前后最高档理解，档位从 0.08 按 0.02m/s 升到该值。
         self.declare_parameter('linear_speed', 0.08)
         self.declare_parameter('angular_speed', 0.25)
         self._linear_speed = float(self.get_parameter('linear_speed').value)
