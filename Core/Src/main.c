@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "i2c.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
@@ -33,6 +34,10 @@
 #if ROBOT_APP_MODE == 7
 #include "remote_control.h"
 #endif
+#include "icm20948.h"   /* IMU 驱动：ICM-20948 六轴 + 磁力计 + BMP280 */
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -76,6 +81,35 @@ void SystemClock_Config(void);
  * PWM 波形和编码器计数由定时器硬件完成，不需要 CPU 对每个脉冲逐个操作。
  * 自写内容尽量放在 USER CODE 区域；CubeMX 开启保留用户代码后可保留这些区域。
  */
+
+/**
+ * @brief 把一帧姿态打到 USART2（115200）。整数定点输出，不依赖浮点 printf。
+ * 行首不带 '@'，Mac 网关会忽略，不会干扰遥控协议。
+ */
+static void imu_log(const icm_data_t *d)
+{
+    char line[160];
+    int n;
+    int r10 = (int)(d->roll_deg * 10.0f);
+    int p10 = (int)(d->pitch_deg * 10.0f);
+    int y10 = (int)(d->yaw_deg * 10.0f);
+    int t10 = (int)(d->temp_c * 10.0f);
+    int h10 = (int)(d->press_hpa * 10.0f);
+    float b = sqrtf(d->mag_uT[0] * d->mag_uT[0] + d->mag_uT[1] * d->mag_uT[1] +
+                    d->mag_uT[2] * d->mag_uT[2]);
+
+    n = snprintf(line, sizeof(line),
+                 "IMU r=%d.%01d p=%d.%01d y=%d.%01d | %d.%01d hPa %d.%01d C | B=%d.%01d uT%s\r\n",
+                 r10 / 10, abs(r10 % 10), p10 / 10, abs(p10 % 10), y10 / 10, abs(y10 % 10),
+                 h10 / 10, abs(h10 % 10), t10 / 10, abs(t10 % 10),
+                 (int)b, (int)((b - (float)(int)b) * 10.0f), d->mag_ok ? "" : " (mag无效)");
+    if (n > 0) {
+        if (n > (int)sizeof(line) - 1) {
+            n = (int)sizeof(line) - 1;
+        }
+        HAL_UART_Transmit(&huart2, (uint8_t *)line, (uint16_t)n, 50);
+    }
+}
 /* USER CODE END 0 */
 
 /**
@@ -128,6 +162,7 @@ int main(void)
   MX_TIM2_Init();
   MX_TIM5_Init();
   MX_TIM9_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   /* motor4 持有四路电机状态，先完成初始化，避免定时中断读到未就绪的数据。 */
   /* 首先保持 STBY 关闭，启动 PWM 和编码器读取能力，等待应用下发非零目标。
@@ -145,7 +180,12 @@ int main(void)
   /* 应用从停止状态开始；模式7建立遥控接收状态，其余模式初始化按键/路线。
    * 遥控的结构化T遥测和本地测试的READY文本由各自模式的主循环流程输出。 */
   RobotApp_Init();
-/* USER CODE END 2 */
+  /* IMU 初始化：复位 ICM、配置量程、开磁力计旁路、标定陀螺零偏（约 0.8s）。
+   * 这 0.8 秒板子必须静止；期间电机不会动（电机在收到遥控指令前保持停止）。 */
+#if IMU_DRIVER_ENABLE
+  (void)ICM20948_Init();
+#endif
+  /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -158,9 +198,26 @@ int main(void)
      * 这样运动期间仍能检查按键、故障和超时。HAL_Delay(1) 只是约 1ms 的让步；
      * 它不产生电机的 10ms 控制周期，控制周期由 TIM9 中断独立提供。 */
     RobotApp_Poll();
+
+#if IMU_DRIVER_ENABLE
+    /* 20ms 读一次（50Hz），每 100ms 打一行姿态。都用 tick 判断，不阻塞主循环。 */
+    {
+      static uint32_t imu_next_ms, imu_print_ms;
+      static icm_data_t imu;
+
+      if ((uint32_t)(HAL_GetTick() - imu_next_ms) < 0x80000000U) {
+        imu_next_ms = HAL_GetTick() + 20U;
+        if (ICM20948_Read(&imu) && (uint32_t)(HAL_GetTick() - imu_print_ms) >= 100U) {
+          imu_print_ms = HAL_GetTick();
+          imu_log(&imu);
+        }
+      }
+    }
+#endif
+
     HAL_Delay(1);
   }
-/* USER CODE END 3 */
+  /* USER CODE END 3 */
 }
 
 /**
@@ -221,8 +278,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         /* 指令超时和本地停止先于本周期PI输出，不依赖主循环是否阻塞。 */
         /* 主循环负责接收和解析“下一条命令”，本中断独立检查“已有命令是否过期”。
          * 若许可失效，先停止，再让 motor4 处理停止后的状态，避免继续输出旧目标。 */
+        // 维护4轮运动状态 
+        // 在已武装时，只要按钮按下、故障或命令超时任意一个发生，就调用 DisarmLocked() 解除武装并停四轮。
         RemoteControl_Tick10ms();
 #endif
+// 每 10ms：读编码器算转速 → 查故障和看门狗 → 每轮跑一次 PI 算出占空比 → 四轮一起提交。 
+// 它是整台车唯一真正"驱动电机"的地方，遥控、麦轮、路线 最终都只是给它填目标值。
         Motor4_ControlTick10ms();
     }
 }
@@ -241,7 +302,7 @@ void Error_Handler(void)
   __disable_irq();
   while (1) {
   }
-/* USER CODE END Error_Handler_Debug */
+  /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
 /**
