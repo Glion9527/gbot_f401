@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>f401_base</name>
+  <version>0.1.0</version>
+  <description>STM32 Link v2 base node: /cmd_vel, /odom, /joint_states, TF</description>
+  <maintainer email="robot@example.invalid">Robot project</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>tf2_ros</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -22,6 +22,12 @@ namespace f401::drivers {
 
 class SerialBase final : public hal::IBase {
 public:
+    /* 四轮累计计数与转速，供 ROS 2 /joint_states 使用。 */
+    struct WheelState {
+        std::array<std::int64_t, LINK_V2_WHEEL_COUNT> counts{};
+        std::array<double, LINK_V2_WHEEL_COUNT> rpm{};
+    };
+
     explicit SerialBase(const std::string& device, int baud_rate = 115200);
 
     bool setVelocity(const core::ChassisSpeeds& cmd) override;
@@ -34,6 +40,9 @@ public:
 
     /* 累计收到的 TELEM 帧数，用于验收 50Hz 和排查丢帧。 */
     std::uint32_t telemetryCount() const noexcept { return telemetry_count_; }
+
+    /* 最近一次 TELEM 的四轮累计计数/转速；遥测过期返回 nullopt。 */
+    std::optional<WheelState> getWheelState() const;
 
     /* 新进程启动时把本地 seq 对齐到 STM32 的 last_seq。
      * v2 没有会话握手，STM32 会跨 host 进程保留 s_last_seq；如果 host 总从 1 开始，
@@ -51,6 +60,8 @@ private:
     std::uint16_t seq_ = 0;
     bool armed_ = false;
     std::uint32_t telemetry_count_ = 0;
+    std::array<std::int64_t, LINK_V2_WHEEL_COUNT> wheel_counts_{};
+    std::array<double, LINK_V2_WHEEL_COUNT> wheel_rpm_{};
     hal::OdometryState odometry_{};
     std::optional<std::chrono::steady_clock::time_point> last_telemetry_;
     std::string last_error_;
