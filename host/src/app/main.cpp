@@ -40,6 +40,9 @@ struct Options {
     bool dry_run = false;
     bool arm = false;
     bool help = false;
+    double vx = 0.0;
+    double vy = 0.0;
+    double wz = 0.0;
 };
 
 Options parseOptions(int argc, char** argv)
@@ -59,6 +62,12 @@ Options parseOptions(int argc, char** argv)
             options.port = argv[++index];
         } else if (argument == "--baud" && index + 1 < argc) {
             options.baud = std::atoi(argv[++index]);
+        } else if (argument == "--vx" && index + 1 < argc) {
+            options.vx = std::atof(argv[++index]);
+        } else if (argument == "--vy" && index + 1 < argc) {
+            options.vy = std::atof(argv[++index]);
+        } else if (argument == "--wz" && index + 1 < argc) {
+            options.wz = std::atof(argv[++index]);
         } else {
             std::cerr << "未知参数: " << argument << "\n";
             options.help = true;
@@ -72,7 +81,7 @@ void printUsage()
     std::cout << "用法:\n"
                  "  f401_host --dry-run                 打印示例 CMD 帧\n"
                  "  f401_host --sim                     仿真运行 2 秒\n"
-                 "  f401_host --port <设备> [--baud N] [--arm]  打开串口\n";
+                 "  f401_host --port <设备> [--baud N] [--arm] [--vx M/S] [--vy M/S] [--wz RAD/S]\n";
 }
 
 void printHex(std::span<const std::uint8_t> bytes)
@@ -120,16 +129,27 @@ int runSerial(const Options& options)
         base.setArmed(options.arm);
         std::signal(SIGINT, onSignal);
 
-        /* 立即发一帧零速：既验证写链路，也把 ARM/DISARM 状态同步给 MCU。 */
+        /* 先发一帧零速：既验证写链路，也让 v2 固件在 250ms 静默后满足 ARM 条件。 */
         if (!base.setVelocity({})) {
             std::cerr << "发送失败: " << base.lastError() << "\n";
             return 1;
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
         std::cout << "已打开 " << options.port << "，使能=" << (options.arm ? "是" : "否")
-                  << "，Ctrl-C 退出\n";
+                  << "，目标 vx=" << options.vx << " vy=" << options.vy
+                  << " wz=" << options.wz << "，Ctrl-C 退出\n";
 
+        const f401::core::ChassisSpeeds target{options.vx, options.vy, options.wz};
+        auto next_send = std::chrono::steady_clock::now();
         auto next_print = std::chrono::steady_clock::now();
+        std::uint32_t last_count = base.telemetryCount();
+
         while (!g_stop) {
+            /* 50Hz 持续发送：v2 固件靠新帧刷新 300ms 许可，并喂电机看门狗。 */
+            if (!base.setVelocity(target)) {
+                std::cerr << "发送失败: " << base.lastError() << "\n";
+                return 1;
+            }
             base.poll();
             if (!base.lastError().empty()) {
                 std::cerr << "链路错误: " << base.lastError() << "\n";
@@ -139,19 +159,25 @@ int runSerial(const Options& options)
             const auto now = std::chrono::steady_clock::now();
             if (now >= next_print) {
                 next_print = now + std::chrono::seconds(1);
+                const std::uint32_t count = base.telemetryCount();
+                const std::uint32_t delta = count - last_count;
+                last_count = count;
                 if (const auto odometry = base.getOdometry()) {
-                    std::cout << "seq=" << odometry->seq << " status=0x" << std::hex
-                              << odometry->status << std::dec
-                              << " x=" << odometry->pose.x_m
+                    std::cout << "telem=" << delta << "Hz seq=" << odometry->seq
+                              << " status=0x" << std::hex << odometry->status
+                              << std::dec << " x=" << odometry->pose.x_m
                               << " y=" << odometry->pose.y_m
                               << " yaw=" << odometry->pose.yaw_rad << "\n";
                 } else {
-                    std::cout << "等待 TELEM（当前固件尚未实现 v2 接收端）\n";
+                    std::cout << "telem=" << delta << "Hz 等待 TELEM\n";
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+            next_send += std::chrono::milliseconds(20);
+            std::this_thread::sleep_until(next_send);
         }
 
+        base.setArmed(false);
         base.setVelocity({});
         return 0;
     } catch (const std::exception& error) {

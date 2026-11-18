@@ -89,6 +89,7 @@ void SerialBase::poll()
 void SerialBase::applyTelemetry(const Telemetry& telemetry)
 {
     const auto now = std::chrono::steady_clock::now();
+    ++telemetry_count_;
 
     /* 第一帧没有 dt，只记录时间；之后用实际到达间隔积分。
      * 间隔过大（例如拔线重连）说明中间丢了帧，跳过本次积分避免位姿跳变。 */

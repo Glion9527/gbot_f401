@@ -22,7 +22,14 @@ extern "C" {
 #endif
 
 /* 0 = 整个 IMU 不初始化、不读、不打印；不用 IMU 时改成 0 重新编译 */
-#define IMU_DRIVER_ENABLE 1
+#define IMU_DRIVER_ENABLE 0
+
+/* 串口日志开关：
+ *   0 = 不把姿态文本打印到 USART2（推荐）。控制串口只跑遥控协议帧，
+ *       避免 IMU 文本占用主循环/带宽，或与 T 帧拼接造成网关 CRC 失败。
+ *   1 = 每 100ms 打一行 "IMU r=... p=... y=..."，仅用于台架调试。
+ * IMU 数据仍然照常读取，调试时用 CubeIDE 的 Live Watch 查看。 */
+#define IMU_LOG_ENABLE 0
 
 typedef struct {
     float acc_g[3];      /* 加速度，单位 g */

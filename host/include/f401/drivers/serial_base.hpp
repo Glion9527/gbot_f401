@@ -32,6 +32,9 @@ public:
     void setArmed(bool armed) noexcept { armed_ = armed; }
     bool armed() const noexcept { return armed_; }
 
+    /* 累计收到的 TELEM 帧数，用于验收 50Hz 和排查丢帧。 */
+    std::uint32_t telemetryCount() const noexcept { return telemetry_count_; }
+
     /* 最近一次 I/O 失败原因；空字符串表示没有错误。 */
     const std::string& lastError() const noexcept { return last_error_; }
 
@@ -42,6 +45,7 @@ private:
     LinkV2Decoder decoder_;
     std::uint16_t seq_ = 0;
     bool armed_ = false;
+    std::uint32_t telemetry_count_ = 0;
     hal::OdometryState odometry_{};
     std::optional<std::chrono::steady_clock::time_point> last_telemetry_;
     std::string last_error_;

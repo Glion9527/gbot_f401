@@ -113,12 +113,13 @@ ROS 2 侧不直接解析 ASCII：`ros2_ws` 通过 `robot_link` 客户端走 TCP 
 ## 7. 当前实现状态与下一步
 
 - ✅ 宿主：`SerialPort` RAII、v2 编解码、`SerialBase`、`SimBase`、PTY 测试；
-- ⏳ 固件：尚未实现 v2 接收。下一步新增
-  `Core/Inc/link_v2.h` / `Core/Src/link_v2.c`，复用本文契约；
-  解析在主循环，超时检查挂到 TIM9 的 10ms 回调；
-  v1 ASCII 代码路径保持不动，用编译开关选择；
-- 联调顺序：先 `--dry-run` 核对黄金帧 → 固件烧 v2 → `--port` 收 TELEM →
-  手推小车看里程计 → 再进入阶段 1 的运动学库。
+- ✅ 固件：`Core/Inc/link_v2.h` / `Core/Src/link_v2.c` 已实现；解析在主循环，
+  300ms 超时挂在 TIM9 的 10ms 回调；TELEM 用 `HAL_UART_Transmit_IT` 50Hz 发送；
+  `LINK_PROTOCOL_V2=1` 选择 v2，改成 0 可回退 ASCII v1；
+- ✅ 测试：`tests/link_v2/run_tests.py` 覆盖黄金帧、ARM、坏 CRC、截断、seq 重放、
+  超时和 TELEM 字段；`tests/remote_control` 的 12 组回归继续全过；
+- 联调顺序：`--dry-run` 核对黄金帧 → 烧 v2 固件 → `--port` 收 TELEM →
+  手推小车看里程计 → 再接 ROS 2 节点。
 
 ## 8. 构建与测试
 

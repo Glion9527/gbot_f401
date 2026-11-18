@@ -38,12 +38,12 @@ ctest --test-dir host/build --output-on-failure
 ```bash
 ./build/f401_host --dry-run          # 打印一帧 CMD 的十六进制
 ./build/f401_host --sim              # SimBase 仿真 2 秒并打印位姿
-./build/f401_host --port /dev/ttyACM0 --arm
+./build/f401_host --port /dev/ttyACM0 --arm --vx 0.05
 ```
 
-> 注意：当前 STM32 固件只实现了 ASCII v1 协议（`Core/Src/remote_control.c`），
-> 还没有 Link v2 接收端。因此 `--port` 模式现在能打开串口、能发帧，但收不到
-> TELEM。下一阶段需要在固件侧新增 `link_v2.c`，两端才真正连通。
+> 固件侧已实现 Link v2（`Core/Src/link_v2.c`，`LINK_PROTOCOL_V2=1`）。
+> 烧录后 `--port` 能收到 50Hz TELEM；`--vx/--vy/--wz` 以 m/s、rad/s 指定目标。
+> 不烧 v2、仍运行 ASCII v1 时，宿主只能发帧、收不到 TELEM。
 
 ## 设计边界
 

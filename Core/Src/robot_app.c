@@ -15,18 +15,29 @@
 
 #if ROBOT_APP_MODE == 7
 #include "remote_control.h"
+#if LINK_PROTOCOL_V2
+#include "link_v2.h"
+#endif
 
 /* 遥控模式不进入原按键路线：上电停止，等待串口握手和显式使能。 */
 void RobotApp_Init(void)
 {
+#if LINK_PROTOCOL_V2
+    if (LinkV2_Init() != HAL_OK) Error_Handler();
+#else
     if (RemoteControl_Init() != HAL_OK) Error_Handler();
+#endif
 }
 
 void RobotApp_Poll(void)
 {
     /* 模式7不执行下面的本地按键状态机或普通文本日志；通信和控制许可统一
-     * 由remote_control维护，串口协议遥测也由它发送。 */
+     * 由 remote_control / link_v2 维护，串口遥测也由它发送。 */
+#if LINK_PROTOCOL_V2
+    LinkV2_Poll();
+#else
     RemoteControl_Poll();
+#endif
 }
 
 #else /* 保留原有0..6测试/路线模式 */

@@ -33,6 +33,9 @@
 #include "robot_app.h"
 #if ROBOT_APP_MODE == 7
 #include "remote_control.h"
+#if LINK_PROTOCOL_V2
+#include "link_v2.h"
+#endif
 #endif
 #include "icm20948.h"   /* IMU 驱动：ICM-20948 六轴 + 磁力计 + BMP280 */
 #include <stdio.h>
@@ -85,7 +88,12 @@ void SystemClock_Config(void);
 /**
  * @brief 把一帧姿态打到 USART2（115200）。整数定点输出，不依赖浮点 printf。
  * 行首不带 '@'，Mac 网关会忽略，不会干扰遥控协议。
+ *
+ * 注意：这个函数默认被 IMU_LOG_ENABLE 关闭。控制串口上只应发送协议帧；
+ * 文本日志会占用主循环时间，且一旦与 T 帧拼接就会让网关 CRC 校验失败。
+ * 需要看姿态时优先用 CubeIDE Live Watch，而不是往 USART2 打印。
  */
+#if IMU_DRIVER_ENABLE && IMU_LOG_ENABLE
 static void imu_log(const icm_data_t *d)
 {
     char line[160];
@@ -110,6 +118,7 @@ static void imu_log(const icm_data_t *d)
         HAL_UART_Transmit(&huart2, (uint8_t *)line, (uint16_t)n, 50);
     }
 }
+#endif
 /* USER CODE END 0 */
 
 /**
@@ -209,7 +218,9 @@ int main(void)
         imu_next_ms = HAL_GetTick() + 20U;
         if (ICM20948_Read(&imu) && (uint32_t)(HAL_GetTick() - imu_print_ms) >= 100U) {
           imu_print_ms = HAL_GetTick();
+#if IMU_LOG_ENABLE
           imu_log(&imu);
+#endif
         }
       }
     }
@@ -278,9 +289,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         /* 指令超时和本地停止先于本周期PI输出，不依赖主循环是否阻塞。 */
         /* 主循环负责接收和解析“下一条命令”，本中断独立检查“已有命令是否过期”。
          * 若许可失效，先停止，再让 motor4 处理停止后的状态，避免继续输出旧目标。 */
-        // 维护4轮运动状态 
-        // 在已武装时，只要按钮按下、故障或命令超时任意一个发生，就调用 DisarmLocked() 解除武装并停四轮。
+#if LINK_PROTOCOL_V2
+        LinkV2_Tick10ms();
+#else
         RemoteControl_Tick10ms();
+#endif
 #endif
 // 每 10ms：读编码器算转速 → 查故障和看门狗 → 每轮跑一次 PI 算出占空比 → 四轮一起提交。 
 // 它是整台车唯一真正"驱动电机"的地方，遥控、麦轮、路线 最终都只是给它填目标值。

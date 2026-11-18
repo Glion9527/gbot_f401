@@ -1,0 +1,332 @@
+/* Link v2 固件回归：喂真实黄金帧，检查 ARM/速度/超时/CRC/遥测。
+ * 解析、CRC、motor4 目标来自真实 Core 源码；HAL 在本文件模拟。 */
+
+#include "link_v2.h"
+#include "link_v2_contract.h"
+#include "motor4.h"
+#include "tim.h"
+#include "usart.h"
+
+#include <assert.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+GPIO_TypeDef host_gpio_a, host_gpio_b, host_gpio_c;
+TIM_TypeDef host_tim1, host_tim2, host_tim3, host_tim4, host_tim5, host_tim9;
+TIM_HandleTypeDef htim1 = {TIM1}, htim2 = {TIM2}, htim3 = {TIM3};
+TIM_HandleTypeDef htim4 = {TIM4}, htim5 = {TIM5}, htim9 = {TIM9};
+USART_TypeDef host_usart2;
+UART_HandleTypeDef huart2 = {USART2, 0};
+uint32_t host_primask, host_ms;
+
+uint8_t host_uart_tx[LINK_V2_TELEM_SIZE];
+uint16_t host_uart_tx_len;
+static bool button;
+
+uint32_t HAL_GetTick(void) { return host_ms; }
+
+void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pins, GPIO_PinState state)
+{
+    if (state == GPIO_PIN_SET) {
+        port->ODR |= pins;
+    } else {
+        port->ODR &= ~(uint32_t)pins;
+    }
+}
+
+GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pins)
+{
+    if (port == B1_GPIO_Port && pins == B1_Pin) {
+        return button ? GPIO_PIN_RESET : GPIO_PIN_SET;
+    }
+    return (port->ODR & pins) != 0U ? GPIO_PIN_SET : GPIO_PIN_RESET;
+}
+
+HAL_StatusTypeDef HAL_TIM_PWM_Start(TIM_HandleTypeDef *h, uint32_t channel)
+{
+    h->Instance->pwm_started |= 1U << (channel / 4U);
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef HAL_TIM_PWM_Stop(TIM_HandleTypeDef *h, uint32_t channel)
+{
+    h->Instance->pwm_started &= ~(1U << (channel / 4U));
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef HAL_TIM_Encoder_Start(TIM_HandleTypeDef *h, uint32_t channel)
+{
+    h->Instance->encoder_started = channel;
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef HAL_TIM_Encoder_Stop(TIM_HandleTypeDef *h, uint32_t channel)
+{
+    (void)channel;
+    h->Instance->encoder_started = 0U;
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *h, uint8_t *data,
+                                       uint16_t size)
+{
+    assert(h == &huart2);
+    assert(size == LINK_V2_TELEM_SIZE);
+    memcpy(host_uart_tx, data, size);
+    host_uart_tx_len = size;
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *h, uint8_t *data,
+                                      uint16_t size)
+{
+    (void)data;
+    assert(h == &huart2 && size == 1U);
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef HAL_UART_AbortReceive_IT(UART_HandleTypeDef *h)
+{
+    assert(h == &huart2);
+    return HAL_OK;
+}
+
+static void build_cmd(uint8_t frame[LINK_V2_CMD_SIZE], uint16_t seq,
+                      uint16_t flags, const int16_t wheel[4])
+{
+    frame[LINK_V2_CMD_OFF_HEADER0] = LINK_V2_HEADER0;
+    frame[LINK_V2_CMD_OFF_HEADER1] = LINK_V2_HEADER1;
+    frame[LINK_V2_CMD_OFF_VERSION] = LINK_V2_VERSION;
+    frame[LINK_V2_CMD_OFF_TYPE] = LINK_V2_TYPE_CMD;
+    frame[LINK_V2_CMD_OFF_SEQ] = (uint8_t)(seq & 0xFFU);
+    frame[LINK_V2_CMD_OFF_SEQ + 1U] = (uint8_t)(seq >> 8);
+    frame[LINK_V2_CMD_OFF_FLAGS] = (uint8_t)(flags & 0xFFU);
+    frame[LINK_V2_CMD_OFF_FLAGS + 1U] = (uint8_t)(flags >> 8);
+    for (unsigned i = 0U; i < LINK_V2_WHEEL_COUNT; ++i) {
+        const uint16_t raw = (uint16_t)wheel[i];
+        frame[LINK_V2_CMD_OFF_WHEELS + i * 2U] = (uint8_t)(raw & 0xFFU);
+        frame[LINK_V2_CMD_OFF_WHEELS + i * 2U + 1U] = (uint8_t)(raw >> 8);
+    }
+    const uint16_t crc = link_v2_crc16(
+        &frame[LINK_V2_CMD_OFF_VERSION],
+        LINK_V2_CMD_OFF_CRC - LINK_V2_CMD_OFF_VERSION);
+    frame[LINK_V2_CMD_OFF_CRC] = (uint8_t)(crc & 0xFFU);
+    frame[LINK_V2_CMD_OFF_CRC + 1U] = (uint8_t)(crc >> 8);
+}
+
+static void reset_case(void)
+{
+    host_ms = 1000U;
+    button = false;
+    host_uart_tx_len = 0U;
+    LinkV2_TestReset();
+    /* 模拟固件 10ms 控制周期，让 motor4 的 quiet_ticks 达到换向所需的 200ms。 */
+    for (unsigned i = 0U; i < 25U; ++i) {
+        host_ms += 10U;
+        Motor4_ControlTick10ms();
+    }
+}
+
+static void arm_case(void)
+{
+    host_ms += 300U; /* 满足 250ms 静默条件 */
+    const int16_t zero[4] = {0, 0, 0, 0};
+    uint8_t frame[LINK_V2_CMD_SIZE];
+    build_cmd(frame, 1U, LINK_V2_FLAG_ARM, zero);
+    LinkV2_TestFeed(frame, sizeof(frame));
+    LinkV2_Poll();
+    LinkV2_UART_TxCplt(&huart2);
+    assert(LinkV2_TestArmed());
+}
+
+static float target(unsigned index)
+{
+    Motor4Telemetry t;
+    assert(Motor4_GetTelemetry((Motor4Id)index, &t));
+    return t.target_rpm;
+}
+
+static void test_arm_and_drive(void)
+{
+    reset_case();
+    arm_case();
+
+    const int16_t wheel[4] = {300, 300, 300, 300};
+    uint8_t frame[LINK_V2_CMD_SIZE];
+    build_cmd(frame, 2U, LINK_V2_FLAG_ARM, wheel);
+    LinkV2_TestFeed(frame, sizeof(frame));
+    LinkV2_Poll();
+    LinkV2_UART_TxCplt(&huart2);
+
+    for (unsigned i = 0U; i < 4U; ++i) {
+        assert(fabsf(target(i) - 71.62f) < 0.05f);
+    }
+}
+
+static void test_mixed(void)
+{
+    reset_case();
+    arm_case();
+
+    const int16_t wheel[4] = {-200, 100, 0, 50};
+    uint8_t frame[LINK_V2_CMD_SIZE];
+    build_cmd(frame, 2U, LINK_V2_FLAG_ARM, wheel);
+    LinkV2_TestFeed(frame, sizeof(frame));
+    LinkV2_Poll();
+    LinkV2_UART_TxCplt(&huart2);
+
+    assert(fabsf(target(0U) - (-47.75f)) < 0.05f);
+    assert(fabsf(target(1U) - 23.87f) < 0.05f);
+    assert(fabsf(target(2U) - 0.0f) < 0.01f);
+    assert(fabsf(target(3U) - 11.94f) < 0.05f);
+}
+
+static void test_truncated(void)
+{
+    reset_case();
+    arm_case();
+
+    const int16_t wheel[4] = {300, 300, 300, 300};
+    uint8_t frame[LINK_V2_CMD_SIZE];
+    build_cmd(frame, 2U, LINK_V2_FLAG_ARM, wheel);
+    LinkV2_TestFeed(frame, 10U);
+    LinkV2_Poll();
+    assert(fabsf(target(0U)) < 0.01f);
+
+    LinkV2_TestFeed(frame + 10U, sizeof(frame) - 10U);
+    LinkV2_Poll();
+    LinkV2_UART_TxCplt(&huart2);
+    assert(fabsf(target(0U) - 71.62f) < 0.05f);
+}
+
+static void test_bad_crc_disarms(void)
+{
+    reset_case();
+    arm_case();
+
+    const int16_t wheel[4] = {300, 300, 300, 300};
+    uint8_t frame[LINK_V2_CMD_SIZE];
+    build_cmd(frame, 2U, LINK_V2_FLAG_ARM, wheel);
+    frame[LINK_V2_CMD_OFF_CRC] ^= 0xFFU;
+    LinkV2_TestFeed(frame, sizeof(frame));
+    LinkV2_Poll();
+    LinkV2_UART_TxCplt(&huart2);
+
+    assert(!LinkV2_TestArmed());
+    assert(fabsf(target(0U)) < 0.01f);
+}
+
+static void test_seq_replay_ignored(void)
+{
+    reset_case();
+    arm_case();
+
+    const int16_t first[4] = {300, 300, 300, 300};
+    const int16_t second[4] = {400, 400, 400, 400};
+    uint8_t frame[LINK_V2_CMD_SIZE];
+    build_cmd(frame, 2U, LINK_V2_FLAG_ARM, first);
+    LinkV2_TestFeed(frame, sizeof(frame));
+    LinkV2_Poll();
+    LinkV2_UART_TxCplt(&huart2);
+    assert(fabsf(target(0U) - 71.62f) < 0.05f);
+
+    build_cmd(frame, 2U, LINK_V2_FLAG_ARM, second);
+    LinkV2_TestFeed(frame, sizeof(frame));
+    LinkV2_Poll();
+    LinkV2_UART_TxCplt(&huart2);
+    assert(fabsf(target(0U) - 71.62f) < 0.05f);
+    assert(LinkV2_TestLastSeq() == 2U);
+}
+
+static void test_unarmed_nonzero(void)
+{
+    reset_case();
+
+    const int16_t wheel[4] = {200, 200, 200, 200};
+    uint8_t frame[LINK_V2_CMD_SIZE];
+    build_cmd(frame, 1U, 0U, wheel);
+    LinkV2_TestFeed(frame, sizeof(frame));
+    LinkV2_Poll();
+    LinkV2_UART_TxCplt(&huart2);
+
+    assert(!LinkV2_TestArmed());
+    assert(fabsf(target(0U)) < 0.01f);
+}
+
+static void test_timeout_disarms(void)
+{
+    reset_case();
+    arm_case();
+
+    const int16_t wheel[4] = {300, 300, 300, 300};
+    uint8_t frame[LINK_V2_CMD_SIZE];
+    build_cmd(frame, 2U, LINK_V2_FLAG_ARM, wheel);
+    LinkV2_TestFeed(frame, sizeof(frame));
+    LinkV2_Poll();
+    LinkV2_UART_TxCplt(&huart2);
+    assert(LinkV2_TestArmed());
+
+    host_ms += 301U;
+    LinkV2_Tick10ms();
+    assert(!LinkV2_TestArmed());
+    assert(fabsf(target(0U)) < 0.01f);
+}
+
+static void test_telemetry_frame(void)
+{
+    reset_case();
+    arm_case();
+
+    host_ms += 20U; /* 让 50Hz TELEM 到期 */
+    host_uart_tx_len = 0U;
+    const int16_t wheel[4] = {300, 300, 300, 300};
+    uint8_t frame[LINK_V2_CMD_SIZE];
+    build_cmd(frame, 2U, LINK_V2_FLAG_ARM, wheel);
+    LinkV2_TestFeed(frame, sizeof(frame));
+    LinkV2_Poll();
+
+    assert(host_uart_tx_len == LINK_V2_TELEM_SIZE);
+    assert(host_uart_tx[LINK_V2_TELEM_OFF_HEADER0] == LINK_V2_HEADER0);
+    assert(host_uart_tx[LINK_V2_TELEM_OFF_HEADER1] == LINK_V2_HEADER1);
+    assert(host_uart_tx[LINK_V2_TELEM_OFF_VERSION] == LINK_V2_VERSION);
+    assert(host_uart_tx[LINK_V2_TELEM_OFF_TYPE] == LINK_V2_TYPE_TELEM);
+
+    const uint16_t given = (uint16_t)((uint16_t)host_uart_tx[LINK_V2_TELEM_OFF_CRC] |
+                                      ((uint16_t)host_uart_tx[LINK_V2_TELEM_OFF_CRC + 1U] << 8));
+    const uint16_t actual = link_v2_crc16(
+        &host_uart_tx[LINK_V2_TELEM_OFF_VERSION],
+        LINK_V2_TELEM_OFF_CRC - LINK_V2_TELEM_OFF_VERSION);
+    assert(given == actual);
+
+    const uint16_t seq = (uint16_t)((uint16_t)host_uart_tx[LINK_V2_TELEM_OFF_SEQ] |
+                                    ((uint16_t)host_uart_tx[LINK_V2_TELEM_OFF_SEQ + 1U] << 8));
+    assert(seq == 2U);
+    LinkV2_UART_TxCplt(&huart2);
+}
+
+int main(void)
+{
+    /* motor4 初始化会校验 PWM/编码器定时器的 ARR，和现有 remote_control 测试保持一致。 */
+    host_tim1.ARR = 4199U;
+    host_tim2.ARR = 65535U;
+    host_tim3.ARR = 65535U;
+    host_tim4.ARR = 65535U;
+    host_tim5.ARR = 65535U;
+    host_ms = 1000U;
+    assert(Motor4_Init() == HAL_OK);
+    LinkV2_TestReset();
+
+    test_arm_and_drive();
+    test_mixed();
+    test_truncated();
+    test_bad_crc_disarms();
+    test_seq_replay_ignored();
+    test_unarmed_nonzero();
+    test_timeout_disarms();
+    test_telemetry_frame();
+
+    puts("PASS link_v2");
+    return 0;
+}
