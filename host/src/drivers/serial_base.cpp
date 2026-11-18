@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <thread>
 
 #include "robot_geometry.h"
 
@@ -59,6 +60,25 @@ bool SerialBase::setVelocity(const core::ChassisSpeeds& cmd)
         last_error_ = error.what();
         return false;
     }
+}
+
+bool SerialBase::syncSequence(std::chrono::milliseconds timeout)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        poll();
+        if (!last_error_.empty()) {
+            return false;
+        }
+        if (last_telemetry_) {
+            /* seq_ 是“上一帧已用序号”；setVelocity 会先 ++seq_，
+             * 所以这里直接取 TELEM 回显的 last_seq，下一帧就是 last_seq+1。 */
+            seq_ = odometry_.seq;
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
 }
 
 void SerialBase::poll()

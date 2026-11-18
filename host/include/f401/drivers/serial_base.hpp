@@ -35,6 +35,11 @@ public:
     /* 累计收到的 TELEM 帧数，用于验收 50Hz 和排查丢帧。 */
     std::uint32_t telemetryCount() const noexcept { return telemetry_count_; }
 
+    /* 新进程启动时把本地 seq 对齐到 STM32 的 last_seq。
+     * v2 没有会话握手，STM32 会跨 host 进程保留 s_last_seq；如果 host 总从 1 开始，
+     * 上一轮跑过之后的新序号会被当成旧帧丢弃，ARM/速度永远被拒绝。 */
+    bool syncSequence(std::chrono::milliseconds timeout);
+
     /* 最近一次 I/O 失败原因；空字符串表示没有错误。 */
     const std::string& lastError() const noexcept { return last_error_; }
 

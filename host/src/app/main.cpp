@@ -129,12 +129,48 @@ int runSerial(const Options& options)
         base.setArmed(options.arm);
         std::signal(SIGINT, onSignal);
 
-        /* 先发一帧零速：既验证写链路，也让 v2 固件在 250ms 静默后满足 ARM 条件。 */
-        if (!base.setVelocity({})) {
-            std::cerr << "发送失败: " << base.lastError() << "\n";
+        /* v2 没有会话握手，STM32 会跨 host 进程保留 s_last_seq。
+         * 新进程必须先把本地 seq 对齐到 TELEM 回显的 last_seq，
+         * 否则第一帧 seq=1 会被当成旧序号丢弃，ARM 永远不成功。 */
+        if (!base.syncSequence(std::chrono::milliseconds(1000))) {
+            std::cerr << "等待 TELEM 失败: " << base.lastError() << "\n";
             return 1;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+        /* ARM 必须持续发零速帧重试：固件要求四轮停稳 250ms，
+         * 只发一帧就等，会在静默窗口未满足时直接失败。 */
+        if (options.arm) {
+            bool armed = false;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(800);
+            while (!g_stop && std::chrono::steady_clock::now() < deadline) {
+                if (!base.setVelocity({})) {
+                    std::cerr << "发送失败: " << base.lastError() << "\n";
+                    return 1;
+                }
+                base.poll();
+                const auto odometry = base.getOdometry();
+                if (odometry && (odometry->status & LINK_V2_STATUS_ARMED) != 0U) {
+                    armed = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            if (!armed) {
+                std::uint16_t status = 0U;
+                if (const auto odometry = base.getOdometry()) {
+                    status = odometry->status;
+                }
+                std::cerr << "MCU 未接受 ARM（TELEM status=0x" << std::hex << status
+                          << std::dec << "）；检查四轮是否静止、USER 键是否被按下\n";
+                return 1;
+            }
+        } else {
+            /* 未要求使能时也发一帧零速，把 DISARM 意图明确送达。 */
+            if (!base.setVelocity({})) {
+                std::cerr << "发送失败: " << base.lastError() << "\n";
+                return 1;
+            }
+        }
         std::cout << "已打开 " << options.port << "，使能=" << (options.arm ? "是" : "否")
                   << "，目标 vx=" << options.vx << " vy=" << options.vy
                   << " wz=" << options.wz << "，Ctrl-C 退出\n";
