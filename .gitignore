@@ -23,6 +23,7 @@ build/
 __pycache__/
 *.py[cod]
 .venv/
+.vscode/
 host_control/.local/
 .config/f401_robot/token
 ros2_ws/install/

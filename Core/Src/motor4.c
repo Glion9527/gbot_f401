@@ -542,6 +542,9 @@ void Motor4_GetAllTelemetry(Motor4Telemetry out[MOTOR4_COUNT])
     Unlock(key);
 }
 
+
+// 每 10ms：读编码器算转速 → 查故障和看门狗 → 每轮跑一次 PI 算出占空比 → 四轮一起提交。 
+// 它是整台车唯一真正"驱动电机"的地方，遥控、麦轮、路线 最终都只是给它填目标值。
 void Motor4_ControlTick10ms(void)
 {
     /* 计算和寄存器提交均为有界操作，无串口、等待或HAL_Delay。
@@ -554,6 +557,7 @@ void Motor4_ControlTick10ms(void)
     int16_t pwm[MOTOR4_COUNT] = {0};
 
     /* 即使已锁存故障也继续读编码器，为停稳确认和故障清除提供依据。 */
+    // 1
     for (unsigned i = 0; i < MOTOR4_COUNT; ++i) {
         uint16_t now = (uint16_t)__HAL_TIM_GET_COUNTER(s_cfg[i].encoder);
         /* 先按16位无符号数做差，再转换为最短的有符号变化。
@@ -578,6 +582,7 @@ void Motor4_ControlTick10ms(void)
         }
     }
 
+    // 2 
     if (HasFault()) {
         Unlock(key);
         return;
@@ -590,6 +595,7 @@ void Motor4_ControlTick10ms(void)
         return;
     }
 
+    // 3
     for (unsigned i = 0; i < MOTOR4_COUNT; ++i) {
         if (s_motor[i].mode == MOTOR4_MODE_STOP) continue;
 
@@ -647,6 +653,7 @@ void Motor4_ControlTick10ms(void)
         /* 最后加回命令方向。PI只决定占空比大小，硬件极性由CommitOutputs转换。 */
         pwm[i] = (int16_t)((float)dir * u);
     }
+    // 4
     CommitOutputs(pwm);
     Unlock(key);
 }

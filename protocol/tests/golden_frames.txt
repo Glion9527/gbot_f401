@@ -1,0 +1,14 @@
+# Link v2 黄金帧（由 host_control/robot_link/protocol.py 的 crc16 生成）
+# 用途：固件 C、宿主 C++、Python 三端用同一组字节验证 CRC/字段顺序/大小端。
+# 每行：名称 长度 十六进制字节
+#
+# CMD: header A5 5A | version 02 | type 01 | seq u16le | flags u16le | 4×i16le | crc u16le
+
+cmd_arm_zero     18  A5 5A 02 01 01 00 01 00 00 00 00 00 00 00 00 00 FB 76
+cmd_drive_300    18  A5 5A 02 01 02 00 01 00 2C 01 2C 01 2C 01 2C 01 86 29
+cmd_mixed        18  A5 5A 02 01 03 00 01 00 38 FF 64 00 00 00 32 00 28 B7
+
+# TELEM: header A5 5A | version 02 | type 81 | seq u16le | mcu_ms u16le |
+#        status u16le | fault u16le | 4×delta i16le | 4×rpm_x10 i16le | crc u16le
+
+telem_nominal    30  A5 5A 02 81 02 00 D2 04 01 00 00 00 0A 00 EC FF 1E 00 D8 FF 2C 01 2C 01 2C 01 2C 01 36 DC

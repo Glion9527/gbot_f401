@@ -23,6 +23,14 @@
  * 这不是串口收到的运行时参数，不能靠ROS话题切换此宏。 */
 #define ROBOT_APP_MODE       7
 #endif
+
+/* 串口协议选择：
+ *   0 = ASCII v1（remote_control.c）
+ *   1 = 二进制 Link v2（link_v2.c）
+ * M4 分支设为 1；回退 v1 改成 0 重新编译。 */
+#ifndef LINK_PROTOCOL_V2
+#define LINK_PROTOCOL_V2     1
+#endif
 #define ROBOT_APP_TEST_PWM   150    /* 仅模式 0：PWM 千分比，150 = 15% */
 #if ROBOT_APP_MODE == 1
 #define ROBOT_APP_TEST_RPM   85.0f  /* 路线直行时四轮的目标转速，单位 RPM（转/分） */

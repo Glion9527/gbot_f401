@@ -24,6 +24,9 @@
 #include "robot_app.h"
 #if ROBOT_APP_MODE == 7
 #include "remote_control.h"
+#if LINK_PROTOCOL_V2
+#include "link_v2.h"
+#endif
 #endif
 /* USART2 用于把运行状态发送到电脑：PA2=TX（发送），PA3=RX（接收）。
  * NUCLEO 板默认通过 ST-LINK 虚拟串口转到 USB，电脑串口终端需设为
@@ -131,21 +134,40 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 /* USER CODE BEGIN 1 */
 /* HAL 库定义了同名弱回调；这里的实现会替换默认空实现。
  * 回调由 USART2 中断路径触发，不需要 main 手动反复调用。
- * 遥控模块每次接收完成后安排下一次接收，并把解析工作留给 RemoteControl_Poll。 */
+ * LINK_PROTOCOL_V2 选择二进制模块，否则走原 ASCII 遥控模块。 */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *uart)
 {
 #if ROBOT_APP_MODE == 7
+#if LINK_PROTOCOL_V2
+    LinkV2_UART_RxCplt(uart);
+#else
     RemoteControl_UART_RxCplt(uart);
+#endif
 #else
     (void)uart;
 #endif
 }
 
-/* 错误回调把丢字节/串口错误交给遥控模块记录，防止残缺命令被继续拼接执行。 */
+/* 错误回调把丢字节/串口错误交给当前协议模块记录，防止残缺命令被继续拼接执行。 */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *uart)
 {
 #if ROBOT_APP_MODE == 7
+#if LINK_PROTOCOL_V2
+    LinkV2_UART_Error(uart);
+#else
     RemoteControl_UART_Error(uart);
+#endif
+#else
+    (void)uart;
+#endif
+}
+
+/* v2 的 TELEM 通过中断发送；完成回调清掉“忙”标志，允许下一帧遥测。
+ * v1 使用阻塞发送，不需要这个回调。 */
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *uart)
+{
+#if ROBOT_APP_MODE == 7 && LINK_PROTOCOL_V2
+    LinkV2_UART_TxCplt(uart);
 #else
     (void)uart;
 #endif

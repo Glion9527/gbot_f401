@@ -446,10 +446,12 @@ void RemoteControl_Tick10ms(void)
     uint32_t now = HAL_GetTick();
     Motor4Telemetry t[MOTOR4_COUNT];
     Motor4_GetAllTelemetry(t);
+    // 维护4轮运动状态
     for (unsigned i = 0; i < MOTOR4_COUNT; ++i) {
         if (t[i].delta != 0 || t[i].position != s_position[i]) s_last_motion_ms = now;
         s_position[i] = t[i].position;
     }
+    // 在已武装时，只要按钮按下、故障或命令超时任意一个发生，就调用 DisarmLocked() 解除武装并停四轮。
     if (s_armed && (ButtonPressed() || FaultMask(t) != 0U ||
         (uint32_t)(now - s_valid_at) >= COMMAND_TIMEOUT_MS)) {
         DisarmLocked();
