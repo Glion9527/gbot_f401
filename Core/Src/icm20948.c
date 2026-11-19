@@ -468,6 +468,7 @@ uint8_t ICM20948_Read(icm_data_t *out)
     out->temp_c = (s_bmp_ok && s_temp_c > -40.0f) ? s_temp_c : out->temp_c;
 
     update_attitude(out, (float)dt_ms / 1000.0f);
+    out->bmp_ok = s_bmp_ok;
     out->timestamp_ms = now;
     return 1;
 }

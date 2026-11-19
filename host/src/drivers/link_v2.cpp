@@ -138,6 +138,17 @@ std::optional<Telemetry> LinkV2Decoder::feed(std::span<const std::uint8_t> bytes
                 getI16(&frame[LINK_V2_TELEM_OFF_RPM10 + index * 2u]);
         }
 
+        telemetry.imu_flags = getU16(&frame[LINK_V2_TELEM_OFF_IMU_FLAGS]);
+        for (std::size_t index = 0; index < 3u; ++index) {
+            telemetry.acc_mg[index] =
+                getI16(&frame[LINK_V2_TELEM_OFF_ACC_MG + index * 2u]);
+            telemetry.gyro_dps10[index] =
+                getI16(&frame[LINK_V2_TELEM_OFF_GYRO_DPS10 + index * 2u]);
+            telemetry.mag_ut10[index] =
+                getI16(&frame[LINK_V2_TELEM_OFF_MAG_UT10 + index * 2u]);
+        }
+        telemetry.temp_c10 = getI16(&frame[LINK_V2_TELEM_OFF_TEMP_C10]);
+
         buffer_.erase(buffer_.begin(), buffer_.begin() + LINK_V2_TELEM_SIZE);
         return telemetry;
     }

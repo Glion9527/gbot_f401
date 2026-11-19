@@ -183,6 +183,33 @@ static void test_mixed(void)
     assert(fabsf(target(3U) - 11.94f) < 0.05f);
 }
 
+static void test_turn_inner_deadband(void)
+{
+    reset_case();
+    arm_case();
+
+    /* 先直行 0.1m/s，再叠加 0.55rad/s 转向：内侧轮目标约 2.2RPM。
+     * 低于 8RPM 的轮目标必须按 0 处理，否则会被静摩擦/车身拖动触发故障。 */
+    const int16_t straight[4] = {100, 100, 100, 100};
+    uint8_t frame[LINK_V2_CMD_SIZE];
+    build_cmd(frame, 2U, LINK_V2_FLAG_ARM, straight);
+    LinkV2_TestFeed(frame, sizeof(frame));
+    LinkV2_Poll();
+    LinkV2_UART_TxCplt(&huart2);
+
+    const int16_t turn[4] = {191, 9, 9, 191};
+    build_cmd(frame, 3U, LINK_V2_FLAG_ARM, turn);
+    LinkV2_TestFeed(frame, sizeof(frame));
+    LinkV2_Poll();
+    LinkV2_UART_TxCplt(&huart2);
+
+    assert(fabsf(target(0U) - 45.58f) < 0.1f);
+    assert(fabsf(target(1U) - 0.0f) < 0.01f);
+    assert(fabsf(target(2U) - 0.0f) < 0.01f);
+    assert(fabsf(target(3U) - 45.58f) < 0.1f);
+    assert(LinkV2_TestArmed());
+}
+
 static void test_truncated(void)
 {
     reset_case();
@@ -281,6 +308,14 @@ static void test_telemetry_frame(void)
 
     host_ms += 20U; /* 让 50Hz TELEM 到期 */
     host_uart_tx_len = 0U;
+    const LinkV2ImuSample imu = {
+        .flags = LINK_V2_IMU_VALID | LINK_V2_IMU_MAG_OK,
+        .acc_mg = {-12, 34, 998},
+        .gyro_dps10 = {3, -5, 1},
+        .mag_ut10 = {221, -84, 432},
+        .temp_c10 = 241,
+    };
+    LinkV2_UpdateImu(&imu);
     const int16_t wheel[4] = {300, 300, 300, 300};
     uint8_t frame[LINK_V2_CMD_SIZE];
     build_cmd(frame, 2U, LINK_V2_FLAG_ARM, wheel);
@@ -303,6 +338,17 @@ static void test_telemetry_frame(void)
     const uint16_t seq = (uint16_t)((uint16_t)host_uart_tx[LINK_V2_TELEM_OFF_SEQ] |
                                     ((uint16_t)host_uart_tx[LINK_V2_TELEM_OFF_SEQ + 1U] << 8));
     assert(seq == 2U);
+
+    const uint16_t imu_flags =
+        (uint16_t)((uint16_t)host_uart_tx[LINK_V2_TELEM_OFF_IMU_FLAGS] |
+                   ((uint16_t)host_uart_tx[LINK_V2_TELEM_OFF_IMU_FLAGS + 1U] << 8));
+    assert(imu_flags == (LINK_V2_IMU_VALID | LINK_V2_IMU_MAG_OK));
+    const int16_t acc0 = (int16_t)((uint16_t)host_uart_tx[LINK_V2_TELEM_OFF_ACC_MG] |
+                                   ((uint16_t)host_uart_tx[LINK_V2_TELEM_OFF_ACC_MG + 1U] << 8));
+    const int16_t gyro1 = (int16_t)((uint16_t)host_uart_tx[LINK_V2_TELEM_OFF_GYRO_DPS10 + 2U] |
+                                    ((uint16_t)host_uart_tx[LINK_V2_TELEM_OFF_GYRO_DPS10 + 3U] << 8));
+    assert(acc0 == -12);
+    assert(gyro1 == -5);
     LinkV2_UART_TxCplt(&huart2);
 }
 
@@ -320,6 +366,7 @@ int main(void)
 
     test_arm_and_drive();
     test_mixed();
+    test_turn_inner_deadband();
     test_truncated();
     test_bad_crc_disarms();
     test_seq_replay_ignored();

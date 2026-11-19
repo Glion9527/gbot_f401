@@ -11,6 +11,11 @@
 /* ARM 前要求四轮已停止且最近 250ms 无编码器运动，和 v1 一致。 */
 #define L2_ARM_QUIET_MS 250U
 #define L2_PI 3.14159265358979323846f
+/* 麦轮急转时内侧轮目标会降到几 RPM 甚至反向。这个速度下 PI 占空比
+ * 不足以稳定克服静摩擦，轮子可能被车身拖动反转，触发
+ * MOTOR4_FAULT_NO_FEEDBACK 或 MOTOR4_FAULT_WRONG_DIRECTION。
+ * v2 把低于该值的轮目标按 0 处理，只让外侧轮驱动转向。 */
+#define L2_MIN_WHEEL_RPM 8.0f
 
 static volatile uint8_t s_rx[L2_RX_CAPACITY];
 static volatile uint32_t s_rx_at[L2_RX_CAPACITY];
@@ -41,6 +46,7 @@ static uint32_t s_frame_generation;
 /* TELEM 发送缓冲必须是静态的：HAL_UART_Transmit_IT 在函数返回后仍会读取它。 */
 static uint8_t s_tx_frame[LINK_V2_TELEM_SIZE];
 static volatile bool s_tx_busy;
+static LinkV2ImuSample s_imu;
 
 static uint32_t Lock(void)
 {
@@ -217,6 +223,8 @@ static void ExecuteFrame(const uint8_t frame[LINK_V2_CMD_SIZE], uint32_t generat
         rpm[i] = (float)wheel[i] * factor;
         if (!isfinite(rpm[i]) || fabsf(rpm[i]) > MOTOR4_MAX_TARGET_RPM) {
             invalid = true;
+        } else if (fabsf(rpm[i]) < L2_MIN_WHEEL_RPM) {
+            rpm[i] = 0.0f;
         }
     }
     if (invalid || !Motor4_SetAllSpeedsRPM(rpm[0], rpm[1], rpm[2], rpm[3])) {
@@ -264,6 +272,7 @@ static void SendTelemetry(void)
     const bool estop = s_estop;
     const bool timed_out = s_timed_out;
     const uint16_t seq = s_last_seq;
+    const LinkV2ImuSample imu = s_imu;
     int32_t delta[MOTOR4_COUNT];
     for (unsigned i = 0U; i < MOTOR4_COUNT; ++i) {
         delta[i] = s_delta_acc[i];
@@ -308,6 +317,17 @@ static void SendTelemetry(void)
         PutU16(&s_tx_frame[LINK_V2_TELEM_OFF_RPM10 + i * 2U],
                (uint16_t)ClampI16(rpm10));
     }
+
+    PutU16(&s_tx_frame[LINK_V2_TELEM_OFF_IMU_FLAGS], imu.flags);
+    for (unsigned i = 0U; i < 3U; ++i) {
+        PutU16(&s_tx_frame[LINK_V2_TELEM_OFF_ACC_MG + i * 2U],
+               (uint16_t)imu.acc_mg[i]);
+        PutU16(&s_tx_frame[LINK_V2_TELEM_OFF_GYRO_DPS10 + i * 2U],
+               (uint16_t)imu.gyro_dps10[i]);
+        PutU16(&s_tx_frame[LINK_V2_TELEM_OFF_MAG_UT10 + i * 2U],
+               (uint16_t)imu.mag_ut10[i]);
+    }
+    PutU16(&s_tx_frame[LINK_V2_TELEM_OFF_TEMP_C10], (uint16_t)imu.temp_c10);
 
     const uint16_t crc = link_v2_crc16(
         &s_tx_frame[LINK_V2_TELEM_OFF_VERSION],
@@ -421,6 +441,17 @@ void LinkV2_Poll(void)
     }
 }
 
+void LinkV2_UpdateImu(const LinkV2ImuSample *sample)
+{
+    uint32_t key = Lock();
+    if (sample != NULL) {
+        s_imu = *sample;
+    } else {
+        s_imu = (LinkV2ImuSample){0};
+    }
+    Unlock(key);
+}
+
 HAL_StatusTypeDef LinkV2_Init(void)
 {
     uint32_t key = Lock();
@@ -437,6 +468,7 @@ HAL_StatusTypeDef LinkV2_Init(void)
     s_last_motion_ms = s_valid_at;
     s_telem_due_ms = s_valid_at;
     s_tx_busy = false;
+    s_imu = (LinkV2ImuSample){0};
     for (unsigned i = 0U; i < MOTOR4_COUNT; ++i) {
         s_position[i] = 0;
         s_delta_acc[i] = 0;

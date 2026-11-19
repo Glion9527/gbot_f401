@@ -28,6 +28,15 @@ public:
         std::array<double, LINK_V2_WHEEL_COUNT> rpm{};
     };
 
+    /* 最近一次 TELEM 携带的 IMU 原始整数量。 */
+    struct ImuState {
+        std::uint16_t flags = 0;
+        std::array<std::int16_t, 3> acc_mg{};
+        std::array<std::int16_t, 3> gyro_dps10{};
+        std::array<std::int16_t, 3> mag_ut10{};
+        std::int16_t temp_c10 = 0;
+    };
+
     explicit SerialBase(const std::string& device, int baud_rate = 115200);
 
     bool setVelocity(const core::ChassisSpeeds& cmd) override;
@@ -43,6 +52,9 @@ public:
 
     /* 最近一次 TELEM 的四轮累计计数/转速；遥测过期返回 nullopt。 */
     std::optional<WheelState> getWheelState() const;
+
+    /* 最近一次 TELEM 的 IMU 原始值；遥测过期返回 nullopt。 */
+    std::optional<ImuState> getImu() const;
 
     /* 新进程启动时把本地 seq 对齐到 STM32 的 last_seq。
      * v2 没有会话握手，STM32 会跨 host 进程保留 s_last_seq；如果 host 总从 1 开始，
@@ -62,6 +74,7 @@ private:
     std::uint32_t telemetry_count_ = 0;
     std::array<std::int64_t, LINK_V2_WHEEL_COUNT> wheel_counts_{};
     std::array<double, LINK_V2_WHEEL_COUNT> wheel_rpm_{};
+    ImuState imu_{};
     hal::OdometryState odometry_{};
     std::optional<std::chrono::steady_clock::time_point> last_telemetry_;
     std::string last_error_;

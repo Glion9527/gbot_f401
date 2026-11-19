@@ -4,9 +4,12 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <sensor_msgs/msg/magnetic_field.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <algorithm>
@@ -66,7 +69,8 @@ std::string jsonEscape(const std::string& text)
 
 class F401BaseNode final : public rclcpp::Node {
 public:
-    F401BaseNode() : Node("f401_base"), tf_broadcaster_(*this)
+    F401BaseNode()
+        : Node("f401_base"), tf_broadcaster_(*this), static_tf_broadcaster_(*this)
     {
         port_ = declare_parameter<std::string>("port", "/dev/f401");
         baud_ = declare_parameter<int>("baud", 115200);
@@ -75,6 +79,7 @@ public:
             "cpr", std::vector<double>{3960.0, 3960.0, 3960.0, 3960.0});
         odom_frame_ = declare_parameter<std::string>("odom_frame", "odom");
         base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
+        imu_frame_ = declare_parameter<std::string>("imu_frame", "imu_link");
 
         if (cpr_.size() != LINK_V2_WHEEL_COUNT) {
             RCLCPP_ERROR(get_logger(), "cpr 需要 4 个值，使用默认 3960");
@@ -94,6 +99,8 @@ public:
             std::bind(&F401BaseNode::onCmd, this, std::placeholders::_1));
         odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
         joint_pub_ = create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
+        imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu/data_raw", 10);
+        mag_pub_ = create_publisher<sensor_msgs::msg::MagneticField>("/imu/mag", 10);
         state_pub_ = create_publisher<std_msgs::msg::String>("/robot/state", 10);
 
         arm_srv_ = create_service<std_srvs::srv::Trigger>(
@@ -111,6 +118,7 @@ public:
 
         timer_ = create_wall_timer(20ms, std::bind(&F401BaseNode::tick, this));
         openSerial();
+        publishStaticImuTransform();
     }
 
     ~F401BaseNode() override
@@ -202,6 +210,7 @@ private:
 
         publishOdometry();
         publishJoints();
+        publishImu();
         publishState();
     }
 
@@ -293,9 +302,84 @@ private:
         joint_pub_->publish(msg);
     }
 
+    void publishStaticImuTransform()
+    {
+        /* 先按单位变换发布；IMU 的安装方向/偏移确定后再改这里或加参数。 */
+        geometry_msgs::msg::TransformStamped tf;
+        /* 静态 TF 用时间 0；用 now() 会让 tf2_monitor 把启动时刻到当前
+         * 的时间差算成 imu_link 的巨大延迟。 */
+        tf.header.stamp = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        tf.header.frame_id = base_frame_;
+        tf.child_frame_id = imu_frame_;
+        tf.transform.translation.x = 0.0;
+        tf.transform.translation.y = 0.0;
+        tf.transform.translation.z = 0.0;
+        tf.transform.rotation.x = 0.0;
+        tf.transform.rotation.y = 0.0;
+        tf.transform.rotation.z = 0.0;
+        tf.transform.rotation.w = 1.0;
+        static_tf_broadcaster_.sendTransform(tf);
+    }
+
+    void publishImu()
+    {
+        if (!base_) {
+            return;
+        }
+        const auto imu = base_->getImu();
+        if (!imu || (imu->flags & LINK_V2_IMU_VALID) == 0U) {
+            return;
+        }
+
+        const rclcpp::Time stamp = now();
+        constexpr double gravity = 9.80665;
+        constexpr double deg_to_rad = std::numbers::pi / 180.0;
+
+        sensor_msgs::msg::Imu msg;
+        msg.header.stamp = stamp;
+        msg.header.frame_id = imu_frame_;
+        msg.linear_acceleration.x = static_cast<double>(imu->acc_mg[0]) * 0.001 * gravity;
+        msg.linear_acceleration.y = static_cast<double>(imu->acc_mg[1]) * 0.001 * gravity;
+        msg.linear_acceleration.z = static_cast<double>(imu->acc_mg[2]) * 0.001 * gravity;
+        msg.angular_velocity.x = static_cast<double>(imu->gyro_dps10[0]) * 0.1 * deg_to_rad;
+        msg.angular_velocity.y = static_cast<double>(imu->gyro_dps10[1]) * 0.1 * deg_to_rad;
+        msg.angular_velocity.z = static_cast<double>(imu->gyro_dps10[2]) * 0.1 * deg_to_rad;
+
+        /* 当前只发布原始数据，不在 MCU/host 提供姿态。 */
+        msg.orientation.w = 1.0;
+        msg.orientation_covariance.fill(0.0);
+        msg.orientation_covariance[0] = -1.0;
+
+        msg.linear_acceleration_covariance.fill(0.0);
+        msg.linear_acceleration_covariance[0] = 0.01;
+        msg.linear_acceleration_covariance[4] = 0.01;
+        msg.linear_acceleration_covariance[8] = 0.01;
+        msg.angular_velocity_covariance.fill(0.0);
+        msg.angular_velocity_covariance[0] = 1e-4;
+        msg.angular_velocity_covariance[4] = 1e-4;
+        msg.angular_velocity_covariance[8] = 1e-4;
+        imu_pub_->publish(msg);
+
+        if ((imu->flags & LINK_V2_IMU_MAG_OK) == 0U) {
+            return;
+        }
+        sensor_msgs::msg::MagneticField mag;
+        mag.header.stamp = stamp;
+        mag.header.frame_id = imu_frame_;
+        mag.magnetic_field.x = static_cast<double>(imu->mag_ut10[0]) * 0.1 * 1e-6;
+        mag.magnetic_field.y = static_cast<double>(imu->mag_ut10[1]) * 0.1 * 1e-6;
+        mag.magnetic_field.z = static_cast<double>(imu->mag_ut10[2]) * 0.1 * 1e-6;
+        mag.magnetic_field_covariance.fill(0.0);
+        mag.magnetic_field_covariance[0] = 1e-8;
+        mag.magnetic_field_covariance[4] = 1e-8;
+        mag.magnetic_field_covariance[8] = 1e-8;
+        mag_pub_->publish(mag);
+    }
+
     void publishState()
     {
         const auto odometry = base_ ? base_->getOdometry() : std::nullopt;
+        const auto imu = base_ ? base_->getImu() : std::nullopt;
         const bool connected = base_ && base_->lastError().empty();
         const std::uint16_t status = odometry ? odometry->status : 0U;
         const std::uint16_t fault_mask = odometry ? odometry->fault_mask : 0U;
@@ -311,6 +395,8 @@ private:
             << ",\"x\":" << (odometry ? odometry->pose.x_m : 0.0)
             << ",\"y\":" << (odometry ? odometry->pose.y_m : 0.0)
             << ",\"yaw\":" << (odometry ? odometry->pose.yaw_rad : 0.0)
+            << ",\"imu_flags\":" << (imu ? imu->flags : 0U)
+            << ",\"imu_temp_c\":" << (imu ? static_cast<double>(imu->temp_c10) / 10.0 : 0.0)
             << ",\"reason\":\"" << jsonEscape(reason) << "\"}";
 
         std_msgs::msg::String msg;
@@ -402,6 +488,7 @@ private:
     std::vector<double> cpr_;
     std::string odom_frame_;
     std::string base_frame_;
+    std::string imu_frame_;
 
     std::unique_ptr<SerialBase> base_;
     ChassisSpeeds target_{};
@@ -413,12 +500,15 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr cmd_sub_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::MagneticField>::SharedPtr mag_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr arm_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr disarm_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr connect_srv_;
     rclcpp::TimerBase::SharedPtr timer_;
     tf2_ros::TransformBroadcaster tf_broadcaster_;
+    tf2_ros::StaticTransformBroadcaster static_tf_broadcaster_;
 };
 
 }  // namespace

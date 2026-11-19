@@ -1,6 +1,6 @@
 """终端点按调档。按键改变目标，定时器持续发布当前速度。"""
-# 本节点把键盘操作变成/cmd_vel消息，由network_bridge转交给Mac网关。
-# 它不打开串口，也不执行电机PI；使能/停止通过ROS Trigger服务请求桥接节点完成。
+# 本节点把键盘操作变成/cmd_vel消息，由 f401_base 节点直接转发给 STM32。
+# 它不打开串口，也不执行电机PI；使能/停止通过ROS Trigger服务请求 f401_base 完成。
 import os
 import select
 import sys
@@ -45,7 +45,7 @@ class KeyboardNode(Node):
         generation = self._generation
         client = self._arm if arm else self._stop
         if not client.service_is_ready():
-            print('服务未就绪，先启动 network_bridge。', flush=True)
+            print('服务未就绪，先启动 f401_base 节点。', flush=True)
             return
         self._pending = client.call_async(Trigger.Request())
 
@@ -64,7 +64,7 @@ class KeyboardNode(Node):
 
     def publish(self, velocity):
         # velocity的单位就是ROS标准的m/s、rad/s，这里直接填字段。
-        # 时间戳供桥接节点判断消息年龄；base_link表示速度相对于车身，而非地图坐标系。
+        # 时间戳供 f401_base 判断消息年龄；base_link表示速度相对于车身，而非地图坐标系。
         msg = TwistStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'base_link'
@@ -138,7 +138,7 @@ class Keyboard(KeyboardNode):
         self._last_tick = None
         self._last_log = None
         print('点按调档 W/X 前后 · A/D 横移 · Q/E 转向 · S 停车', flush=True)
-        print('R 使能 · 空格解除使能 · Ctrl-C 退出。松键保持档位，长按随终端重复输入调档。', flush=True)
+        print('R 使能 · 空格解除使能 · Ctrl-C 退出。失焦保持原档位继续运行。', flush=True)
 
     def _service(self, arm):
         self._gears.clear()
@@ -170,8 +170,12 @@ class Keyboard(KeyboardNode):
                 self._focused = key == 'focus_in'
 
         # 同批出现停止键时，丢弃这批里的调档和使能字符。
-        if ' ' in keys or 'focus_out' in keys:
+        if ' ' in keys:
             self._service(False)
+        elif 'focus_out' in keys:
+            # 终端失焦不改变档位、不解除 ARM，继续按原目标速度运行。
+            # 只更新 _focused，避免失焦期间误收其他字符。
+            pass
         elif 's' in keys or '0' in keys:
             self._gears.clear()
         elif self._focused and 'r' in keys:

@@ -16,6 +16,7 @@ def generate_launch_description():
                 'cpr': [3960.0, 3960.0, 3960.0, 3960.0],
                 'odom_frame': 'odom',
                 'base_frame': 'base_link',
+                'imu_frame': 'imu_link',
             }],
         )
     ])

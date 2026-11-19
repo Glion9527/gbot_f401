@@ -39,10 +39,12 @@ ctest --test-dir host/build --output-on-failure
 ./build/f401_host --dry-run          # 打印一帧 CMD 的十六进制
 ./build/f401_host --sim              # SimBase 仿真 2 秒并打印位姿
 ./build/f401_host --port /dev/ttyACM0 --arm --vx 0.05
+./build/f401_host --port /dev/ttyACM0 --imu   # 每秒打印 TELEM 中的 IMU 原始值
 ```
 
 > 固件侧已实现 Link v2（`Core/Src/link_v2.c`，`LINK_PROTOCOL_V2=1`）。
 > 烧录后 `--port` 能收到 50Hz TELEM；`--vx/--vy/--wz` 以 m/s、rad/s 指定目标。
+> `--imu` 打印 `imu_flags`、加速度 mg、陀螺 0.1dps、磁场 0.1uT、温度 0.1C。
 > 不烧 v2、仍运行 ASCII v1 时，宿主只能发帧、收不到 TELEM。
 
 ## 设计边界

@@ -10,7 +10,7 @@ int main(void)
     if (link_v2_crc16(text, sizeof(text)) != 0x29B1u) {
         return 1;
     }
-    if (LINK_V2_CMD_SIZE != 18u || LINK_V2_TELEM_SIZE != 30u) {
+    if (LINK_V2_CMD_SIZE != 18u || LINK_V2_TELEM_SIZE != 52u) {
         return 1;
     }
     if (LINK_V2_CMD_OFF_CRC + 2u != LINK_V2_CMD_SIZE ||

@@ -29,13 +29,13 @@ extern "C" {
 #define LINK_V2_HEADER1 0x5Au
 
 /* 协议版本和帧类型。version 用于未来升级；type 区分方向/用途。 */
-#define LINK_V2_VERSION 0x02u
+#define LINK_V2_VERSION 0x03u
 #define LINK_V2_TYPE_CMD 0x01u   /* 树莓派 -> STM32 */
 #define LINK_V2_TYPE_TELEM 0x81u /* STM32 -> 树莓派 */
 
 /* 帧长：固定长度，接收方按长度取帧，CRC 校验失败则丢一字节重新同步。 */
 #define LINK_V2_CMD_SIZE 18u
-#define LINK_V2_TELEM_SIZE 30u
+#define LINK_V2_TELEM_SIZE 52u
 #define LINK_V2_WHEEL_COUNT 4u
 
 /* CMD 帧偏移（18 字节）。 */
@@ -48,7 +48,7 @@ extern "C" {
 #define LINK_V2_CMD_OFF_WHEELS 8u  /* 4 × int16：FL, FR, RL, RR */
 #define LINK_V2_CMD_OFF_CRC 16u
 
-/* TELEM 帧偏移（30 字节）。 */
+/* TELEM 帧偏移（52 字节）：原 30 字节控制遥测 + IMU 原始数据。 */
 #define LINK_V2_TELEM_OFF_HEADER0 0u
 #define LINK_V2_TELEM_OFF_HEADER1 1u
 #define LINK_V2_TELEM_OFF_VERSION 2u
@@ -59,7 +59,12 @@ extern "C" {
 #define LINK_V2_TELEM_OFF_FAULT 10u
 #define LINK_V2_TELEM_OFF_DELTA 12u /* 4 × int16：自上一 TELEM 以来的编码器增量 */
 #define LINK_V2_TELEM_OFF_RPM10 20u /* 4 × int16：转速 ×10 */
-#define LINK_V2_TELEM_OFF_CRC 28u
+#define LINK_V2_TELEM_OFF_IMU_FLAGS 28u /* u16，LINK_V2_IMU_* */
+#define LINK_V2_TELEM_OFF_ACC_MG 30u    /* 3 × int16：mg，含重力 */
+#define LINK_V2_TELEM_OFF_GYRO_DPS10 36u /* 3 × int16：0.1 deg/s */
+#define LINK_V2_TELEM_OFF_MAG_UT10 42u  /* 3 × int16：0.1 uT */
+#define LINK_V2_TELEM_OFF_TEMP_C10 48u  /* int16：0.1 degC */
+#define LINK_V2_TELEM_OFF_CRC 50u
 
 /* CMD flags：bit0 使能，bit1 解除使能，bit2 急停。
  * 每帧都携带当前意图；STM32 只在“显式 ARM 且满足停稳/无故障条件”时接受运动。 */
@@ -72,6 +77,12 @@ extern "C" {
 #define LINK_V2_STATUS_FAULT 0x0002u
 #define LINK_V2_STATUS_ESTOP 0x0004u
 #define LINK_V2_STATUS_CMD_TIMEOUT 0x0008u
+
+/* TELEM IMU flags：0 表示本帧无有效 IMU 数据。 */
+#define LINK_V2_IMU_VALID 0x0001u
+#define LINK_V2_IMU_MAG_OK 0x0002u
+#define LINK_V2_IMU_BMP_OK 0x0004u
+#define LINK_V2_IMU_GYRO_CAL 0x0008u
 
 /* 时间参数：沿用现有固件的 300ms 遥控超时；遥测 50Hz。 */
 #define LINK_V2_CMD_TIMEOUT_MS 300u
@@ -100,12 +111,12 @@ static inline uint16_t link_v2_crc16(const uint8_t *data, size_t size)
 /* 编译期校验帧长和字段偏移，防止两端“看起来一致、实际错位”。 */
 #if defined(__cplusplus)
 static_assert(LINK_V2_CMD_SIZE == 18u, "CMD frame must stay 18 bytes");
-static_assert(LINK_V2_TELEM_SIZE == 30u, "TELEM frame must stay 30 bytes");
+static_assert(LINK_V2_TELEM_SIZE == 52u, "TELEM frame must stay 52 bytes");
 static_assert(LINK_V2_CMD_OFF_CRC + 2u == LINK_V2_CMD_SIZE, "CMD CRC must be last");
 static_assert(LINK_V2_TELEM_OFF_CRC + 2u == LINK_V2_TELEM_SIZE, "TELEM CRC must be last");
 #else
 _Static_assert(LINK_V2_CMD_SIZE == 18u, "CMD frame must stay 18 bytes");
-_Static_assert(LINK_V2_TELEM_SIZE == 30u, "TELEM frame must stay 30 bytes");
+_Static_assert(LINK_V2_TELEM_SIZE == 52u, "TELEM frame must stay 52 bytes");
 _Static_assert(LINK_V2_CMD_OFF_CRC + 2u == LINK_V2_CMD_SIZE, "CMD CRC must be last");
 _Static_assert(LINK_V2_TELEM_OFF_CRC + 2u == LINK_V2_TELEM_SIZE, "TELEM CRC must be last");
 #endif

@@ -43,6 +43,48 @@
 #include <math.h>
 /* USER CODE END Includes */
 
+#if IMU_DRIVER_ENABLE && ROBOT_APP_MODE == 7 && LINK_PROTOCOL_V2
+/* 把 ICM20948 的浮点数据量化成 TELEM 使用的整数。
+ * 量化只发生在主循环，不在 10ms 中断里做 I2C 或浮点格式转换。 */
+static int16_t ImuClampI16(float value)
+{
+    if (!isfinite(value)) {
+        return 0;
+    }
+    if (value > 32767.0f) {
+        return 32767;
+    }
+    if (value < -32768.0f) {
+        return -32768;
+    }
+    return (int16_t)lroundf(value);
+}
+
+static void ImuPublishV2(const icm_data_t *imu)
+{
+    LinkV2ImuSample sample = {0};
+    if (imu == NULL) {
+        LinkV2_UpdateImu(NULL);
+        return;
+    }
+
+    sample.flags = LINK_V2_IMU_VALID;
+    if (imu->mag_ok) {
+        sample.flags |= LINK_V2_IMU_MAG_OK;
+    }
+    if (imu->bmp_ok) {
+        sample.flags |= LINK_V2_IMU_BMP_OK;
+    }
+    for (unsigned i = 0U; i < 3U; ++i) {
+        sample.acc_mg[i] = ImuClampI16(imu->acc_g[i] * 1000.0f);
+        sample.gyro_dps10[i] = ImuClampI16(imu->gyro_dps[i] * 10.0f);
+        sample.mag_ut10[i] = ImuClampI16(imu->mag_uT[i] * 10.0f);
+    }
+    sample.temp_c10 = ImuClampI16(imu->temp_c * 10.0f);
+    LinkV2_UpdateImu(&sample);
+}
+#endif
+
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
@@ -209,17 +251,27 @@ int main(void)
     RobotApp_Poll();
 
 #if IMU_DRIVER_ENABLE
-    /* 20ms 读一次（50Hz），每 100ms 打一行姿态。都用 tick 判断，不阻塞主循环。 */
+    /* 20ms 读一次（50Hz）。IMU 数据只在读取成功后更新 TELEM；
+     * 读取失败会把 IMU 标志清 0，不影响电机和 v2 遥控链路。 */
     {
       static uint32_t imu_next_ms, imu_print_ms;
       static icm_data_t imu;
 
       if ((uint32_t)(HAL_GetTick() - imu_next_ms) < 0x80000000U) {
         imu_next_ms = HAL_GetTick() + 20U;
-        if (ICM20948_Read(&imu) && (uint32_t)(HAL_GetTick() - imu_print_ms) >= 100U) {
-          imu_print_ms = HAL_GetTick();
+        if (ICM20948_Read(&imu)) {
+#if ROBOT_APP_MODE == 7 && LINK_PROTOCOL_V2
+          ImuPublishV2(&imu);
+#endif
+          if ((uint32_t)(HAL_GetTick() - imu_print_ms) >= 100U) {
+            imu_print_ms = HAL_GetTick();
 #if IMU_LOG_ENABLE
-          imu_log(&imu);
+            imu_log(&imu);
+#endif
+          }
+        } else {
+#if ROBOT_APP_MODE == 7 && LINK_PROTOCOL_V2
+          LinkV2_UpdateImu(NULL);
 #endif
         }
       }

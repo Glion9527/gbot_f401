@@ -32,6 +32,18 @@ void LinkV2_Poll(void);
 /* TIM9 的 10ms 回调调用：更新运动状态、累计编码器增量、检查 300ms 超时。 */
 void LinkV2_Tick10ms(void);
 
+/* 主循环在 IMU 读取成功后调用；sample 为 NULL 表示本帧 IMU 数据无效。
+ * 只拷贝量化后的整数，不在链路层做 I2C 访问。 */
+typedef struct {
+    uint16_t flags;              /* LINK_V2_IMU_* */
+    int16_t acc_mg[3];           /* mg，含重力 */
+    int16_t gyro_dps10[3];       /* 0.1 deg/s */
+    int16_t mag_ut10[3];         /* 0.1 uT */
+    int16_t temp_c10;            /* 0.1 degC */
+} LinkV2ImuSample;
+
+void LinkV2_UpdateImu(const LinkV2ImuSample *sample);
+
 /* HAL USART2 回调转交（由 usart.c 的条件编译分派）。 */
 void LinkV2_UART_RxCplt(UART_HandleTypeDef *uart);
 void LinkV2_UART_Error(UART_HandleTypeDef *uart);

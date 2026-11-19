@@ -9,11 +9,14 @@
 | 订阅 | `/cmd_vel` | `geometry_msgs/msg/TwistStamped` |
 | 发布 | `/odom` | `nav_msgs/msg/Odometry` |
 | 发布 | `/joint_states` | `sensor_msgs/msg/JointState` |
+| 发布 | `/imu/data_raw` | `sensor_msgs/msg/Imu`（原始值，无姿态） |
+| 发布 | `/imu/mag` | `sensor_msgs/msg/MagneticField` |
 | 发布 | `/robot/state` | `std_msgs/msg/String`（JSON） |
 | 服务 | `/robot/arm` | `std_srvs/srv/Trigger` |
 | 服务 | `/robot/disarm` | `std_srvs/srv/Trigger` |
 | 服务 | `/robot/connect` | `std_srvs/srv/Trigger` |
-| TF | `odom -> base_link` | `tf2` |
+| TF | `odom -> base_link` | `tf2`（动态） |
+| TF | `base_link -> imu_link` | `tf2`（静态，当前单位变换） |
 
 ## 构建
 
@@ -49,9 +52,27 @@ bash ros2_ws/run.sh keyboard --ros-args -p linear_speed:=0.08
 
 ```bash
 ros2 topic hz /odom
+ros2 topic hz /imu/data_raw
 ros2 topic echo /robot/state --once
+ros2 topic echo /imu/data_raw --once
+ros2 topic echo /imu/mag --once
 ros2 run tf2_ros tf2_echo odom base_link
+ros2 run tf2_ros tf2_echo base_link imu_link
 ```
+
+## 键盘失焦
+
+终端版 `keyboard` 失焦后 **保持当前档位和 ARM**，所以可以切到另一个终端执行
+`ros2 topic hz /odom` 等验收命令。需要停止时：
+
+- 回到键盘终端按空格；
+- 或在任意终端执行：
+
+```bash
+ros2 service call /robot/disarm std_srvs/srv/Trigger
+```
+
+`keyboard_window` 是独立的 Tk 窗口版，焦点策略不同，不用于本次验收。
 
 ## 注意
 
@@ -61,3 +82,6 @@ ros2 run tf2_ros tf2_echo odom base_link
   `network_bridge`。
 - 当前 `/cmd_vel` 只接受 `TwistStamped`，与现有 `keyboard` 节点一致；
   `teleop_twist_keyboard` 发布的是 `Twist`，暂不兼容。
+- `/imu/data_raw` 的 `orientation_covariance[0] = -1`，表示没有姿态；
+  `/odom` 仍然只来自轮速，IMU 尚未参与融合。
+- `base_link -> imu_link` 目前是单位变换；IMU 安装方向/偏移确定后再改静态 TF。

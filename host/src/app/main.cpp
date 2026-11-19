@@ -39,6 +39,7 @@ struct Options {
     bool sim = false;
     bool dry_run = false;
     bool arm = false;
+    bool imu = false;
     bool help = false;
     double vx = 0.0;
     double vy = 0.0;
@@ -58,6 +59,8 @@ Options parseOptions(int argc, char** argv)
             options.dry_run = true;
         } else if (argument == "--arm") {
             options.arm = true;
+        } else if (argument == "--imu") {
+            options.imu = true;
         } else if (argument == "--port" && index + 1 < argc) {
             options.port = argv[++index];
         } else if (argument == "--baud" && index + 1 < argc) {
@@ -81,7 +84,7 @@ void printUsage()
     std::cout << "用法:\n"
                  "  f401_host --dry-run                 打印示例 CMD 帧\n"
                  "  f401_host --sim                     仿真运行 2 秒\n"
-                 "  f401_host --port <设备> [--baud N] [--arm] [--vx M/S] [--vy M/S] [--wz RAD/S]\n";
+                 "  f401_host --port <设备> [--baud N] [--arm] [--imu] [--vx M/S] [--vy M/S] [--wz RAD/S]\n";
 }
 
 void printHex(std::span<const std::uint8_t> bytes)
@@ -206,6 +209,20 @@ int runSerial(const Options& options)
                               << " yaw=" << odometry->pose.yaw_rad << "\n";
                 } else {
                     std::cout << "telem=" << delta << "Hz 等待 TELEM\n";
+                }
+                if (options.imu) {
+                    if (const auto imu = base.getImu()) {
+                        std::cout << "  imu flags=0x" << std::hex << imu->flags << std::dec
+                                  << " acc_mg=[" << imu->acc_mg[0] << ','
+                                  << imu->acc_mg[1] << ',' << imu->acc_mg[2] << "]"
+                                  << " gyro_dps10=[" << imu->gyro_dps10[0] << ','
+                                  << imu->gyro_dps10[1] << ',' << imu->gyro_dps10[2] << "]"
+                                  << " mag_ut10=[" << imu->mag_ut10[0] << ','
+                                  << imu->mag_ut10[1] << ',' << imu->mag_ut10[2] << "]"
+                                  << " temp_c10=" << imu->temp_c10 << "\n";
+                    } else {
+                        std::cout << "  imu 等待有效 TELEM\n";
+                    }
                 }
             }
 

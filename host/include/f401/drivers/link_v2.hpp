@@ -34,6 +34,11 @@ struct Telemetry {
     std::uint16_t fault_mask = 0;
     std::array<std::int16_t, LINK_V2_WHEEL_COUNT> delta{};   // 编码器增量
     std::array<std::int16_t, LINK_V2_WHEEL_COUNT> rpm_x10{}; // 转速 ×10
+    std::uint16_t imu_flags = 0;                              // LINK_V2_IMU_*
+    std::array<std::int16_t, 3> acc_mg{};                     // mg，含重力
+    std::array<std::int16_t, 3> gyro_dps10{};                 // 0.1 deg/s
+    std::array<std::int16_t, 3> mag_ut10{};                   // 0.1 uT
+    std::int16_t temp_c10 = 0;                                // 0.1 degC
 };
 
 /* 编码一帧 CMD（18 字节），CRC 覆盖 version..wheels。 */

@@ -115,6 +115,11 @@ void SerialBase::applyTelemetry(const Telemetry& telemetry)
         wheel_counts_[index] += telemetry.delta[index];
         wheel_rpm_[index] = telemetry.rpm_x10[index] / 10.0;
     }
+    imu_.flags = telemetry.imu_flags;
+    imu_.acc_mg = telemetry.acc_mg;
+    imu_.gyro_dps10 = telemetry.gyro_dps10;
+    imu_.mag_ut10 = telemetry.mag_ut10;
+    imu_.temp_c10 = telemetry.temp_c10;
 
     /* 第一帧没有 dt，只记录时间；之后用实际到达间隔积分。
      * 间隔过大（例如拔线重连）说明中间丢了帧，跳过本次积分避免位姿跳变。 */
@@ -149,6 +154,17 @@ std::optional<SerialBase::WheelState> SerialBase::getWheelState() const
     state.counts = wheel_counts_;
     state.rpm = wheel_rpm_;
     return state;
+}
+
+std::optional<SerialBase::ImuState> SerialBase::getImu() const
+{
+    if (!last_telemetry_) {
+        return std::nullopt;
+    }
+    if (std::chrono::steady_clock::now() - *last_telemetry_ > kTelemetryTimeout) {
+        return std::nullopt;
+    }
+    return imu_;
 }
 
 std::optional<hal::OdometryState> SerialBase::getOdometry() const

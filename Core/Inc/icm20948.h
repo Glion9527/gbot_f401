@@ -22,13 +22,13 @@ extern "C" {
 #endif
 
 /* 0 = 整个 IMU 不初始化、不读、不打印；不用 IMU 时改成 0 重新编译 */
-#define IMU_DRIVER_ENABLE 0
+#define IMU_DRIVER_ENABLE 1
 
-/* 串口日志开关：
- *   0 = 不把姿态文本打印到 USART2（推荐）。控制串口只跑遥控协议帧，
- *       避免 IMU 文本占用主循环/带宽，或与 T 帧拼接造成网关 CRC 失败。
- *   1 = 每 100ms 打一行 "IMU r=... p=... y=..."，仅用于台架调试。
- * IMU 数据仍然照常读取，调试时用 CubeIDE 的 Live Watch 查看。 */
+/* 串口文本日志开关：
+ *   0 = 不往 USART2 打文本（推荐）。USART2 只跑 v2 二进制帧，
+ *       文本会和 TELEM 拼接，导致 host CRC/解析失败。
+ *   1 = 每 100ms 打一行姿态文本，仅用于不接 v2 的台架调试。
+ * IMU 数据在 v2 下通过 TELEM 的 IMU 字段发送，用 f401_host --imu 查看。 */
 #define IMU_LOG_ENABLE 0
 
 typedef struct {
@@ -42,6 +42,7 @@ typedef struct {
     float pitch_deg;     /* 俯仰，-90..90 */
     float yaw_deg;       /* 航向，-180..180（磁力计修正后的陀螺积分） */
     uint8_t mag_ok;      /* 1 = 本次磁力计数据可用 */
+    uint8_t bmp_ok;      /* 1 = BMP280 已初始化并参与温度/气压 */
     uint32_t timestamp_ms;
 } icm_data_t;
 

@@ -56,7 +56,7 @@ ROS 2 侧不直接解析 ASCII：`ros2_ws` 通过 `robot_link` 客户端走 TCP 
 | --- | --- | --- | --- |
 | 0 | header0 | u8 | `0xA5` |
 | 1 | header1 | u8 | `0x5A` |
-| 2 | version | u8 | `0x02` |
+| 2 | version | u8 | `0x03` |
 | 3 | type | u8 | `0x01` |
 | 4 | seq | u16 LE | 命令序号，回绕比较 |
 | 6 | flags | u16 LE | bit0 ARM、bit1 DISARM、bit2 ESTOP |
@@ -66,13 +66,13 @@ ROS 2 侧不直接解析 ASCII：`ros2_ws` 通过 `robot_link` 客户端走 TCP 
 | 14 | rr_mm_s | i16 LE | 右后轮目标 |
 | 16 | crc16 | u16 LE | 覆盖 offset 2..15 |
 
-### 3.2 TELEM（STM32 → 树莓派，30 字节，建议 50Hz）
+### 3.2 TELEM（STM32 → 树莓派，52 字节，建议 50Hz）
 
 | 偏移 | 字段 | 类型 | 说明 |
 | --- | --- | --- | --- |
 | 0 | header0 | u8 | `0xA5` |
 | 1 | header1 | u8 | `0x5A` |
-| 2 | version | u8 | `0x02` |
+| 2 | version | u8 | `0x03` |
 | 3 | type | u8 | `0x81` |
 | 4 | seq | u16 LE | 最近接受的 CMD seq（回显） |
 | 6 | mcu_ms | u16 LE | MCU 毫秒时钟（回绕） |
@@ -80,7 +80,12 @@ ROS 2 侧不直接解析 ASCII：`ros2_ws` 通过 `robot_link` 客户端走 TCP 
 | 10 | fault_mask | u16 LE | 四轮故障按位或 |
 | 12 | delta | 4×i16 LE | 自上一 TELEM 以来的编码器增量 |
 | 20 | rpm_x10 | 4×i16 LE | 四轮转速 ×10 |
-| 28 | crc16 | u16 LE | 覆盖 offset 2..27 |
+| 28 | imu_flags | u16 LE | VALID/MAG_OK/BMP_OK/GYRO_CAL |
+| 30 | acc_mg | 3×i16 LE | 加速度 mg，含重力 |
+| 36 | gyro_dps10 | 3×i16 LE | 角速度 0.1 deg/s |
+| 42 | mag_ut10 | 3×i16 LE | 磁场 0.1 uT |
+| 48 | temp_c10 | i16 LE | 温度 0.1 degC |
+| 50 | crc16 | u16 LE | 覆盖 offset 2..49 |
 
 ## 4. CRC 与重同步
 
@@ -100,15 +105,21 @@ ROS 2 侧不直接解析 ASCII：`ros2_ws` 通过 `robot_link` 客户端走 TCP 
 - **遥测**：50Hz（20ms）；TELEM 超过 300ms 没更新，宿主里程计返回 `nullopt`；
 - **速度限幅**：宿主先按 vx≤300、vy≤150、wz≤600mrad/s 限幅，再对四轮做
   75RPM 等比例限幅；STM32 侧仍要保留 110RPM 硬上限（纵深防御）。
+- **低速轮目标死区**：v2 把低于 8RPM 的单轮目标按 0 处理。麦轮急转时内侧轮
+  目标会降到几 RPM 甚至反向，PI 占空比不足以稳定克服静摩擦，编码器可能被
+  车身拖动反转，触发 `NO_FEEDBACK`/`WRONG_DIRECTION`；按 0 处理可让外侧轮
+  继续完成转向。
+- **换向保护**：轮子从正转直接反转仍要求先停稳 200ms；原地换向应先按 `S`
+  停车，等停稳后再给反向转向目标。
 
 ## 6. 黄金帧
 
 | 名称 | 字节 |
 | --- | --- |
-| `cmd_arm_zero` | `A5 5A 02 01 01 00 01 00 00 00 00 00 00 00 00 00 FB 76` |
-| `cmd_drive_300` | `A5 5A 02 01 02 00 01 00 2C 01 2C 01 2C 01 2C 01 86 29` |
-| `cmd_mixed` | `A5 5A 02 01 03 00 01 00 38 FF 64 00 00 00 32 00 28 B7` |
-| `telem_nominal` | `A5 5A 02 81 02 00 D2 04 01 00 00 00 0A 00 EC FF 1E 00 D8 FF 2C 01 2C 01 2C 01 2C 01 36 DC` |
+| `cmd_arm_zero` | `A5 5A 03 01 01 00 01 00 00 00 00 00 00 00 00 00 9A 0D` |
+| `cmd_drive_300` | `A5 5A 03 01 02 00 01 00 2C 01 2C 01 2C 01 2C 01 E7 52` |
+| `cmd_mixed` | `A5 5A 03 01 03 00 01 00 38 FF 64 00 00 00 32 00 49 CC` |
+| `telem_nominal` | `A5 5A 03 81 02 00 D2 04 01 00 00 00 0A 00 EC FF 1E 00 D8 FF 2C 01 2C 01 2C 01 2C 01 03 00 F4 FF 22 00 E6 03 03 00 FB FF 01 00 DD 00 AC FF B0 01 F1 00 46 84` |
 
 ## 7. 当前实现状态与下一步
 
