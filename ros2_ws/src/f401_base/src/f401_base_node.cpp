@@ -80,6 +80,12 @@ public:
         odom_frame_ = declare_parameter<std::string>("odom_frame", "odom");
         base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
         imu_frame_ = declare_parameter<std::string>("imu_frame", "imu_link");
+        (void)declare_parameter<double>("imu_x", 0.0);
+        (void)declare_parameter<double>("imu_y", 0.0);
+        (void)declare_parameter<double>("imu_z", 0.0);
+        (void)declare_parameter<double>("imu_roll", 0.0);
+        (void)declare_parameter<double>("imu_pitch", 0.0);
+        (void)declare_parameter<double>("imu_yaw", 0.0);
 
         if (cpr_.size() != LINK_V2_WHEEL_COUNT) {
             RCLCPP_ERROR(get_logger(), "cpr 需要 4 个值，使用默认 3960");
@@ -119,6 +125,9 @@ public:
         timer_ = create_wall_timer(20ms, std::bind(&F401BaseNode::tick, this));
         openSerial();
         publishStaticImuTransform();
+        /* 每秒按当前参数重发一次静态 TF，便于用 ros2 param set 现场调安装角。 */
+        imu_tf_timer_ = create_wall_timer(
+            1s, std::bind(&F401BaseNode::publishStaticImuTransform, this));
     }
 
     ~F401BaseNode() override
@@ -251,7 +260,8 @@ private:
 
         if (const auto wheel = base_->getWheelState()) {
             const double radius = F401_WHEEL_DIAMETER_MM / 2000.0;
-            const double rpm_to_mps = 2.0 * std::numbers::pi * radius / 60.0;
+            const double rpm_to_mps = 2.0 * std::numbers::pi * radius / 60.0 *
+                                      SerialBase::kOdomWheelScale;
             const WheelSpeeds speeds{
                 wheel->rpm[0] * rpm_to_mps, wheel->rpm[1] * rpm_to_mps,
                 wheel->rpm[2] * rpm_to_mps, wheel->rpm[3] * rpm_to_mps};
@@ -304,20 +314,33 @@ private:
 
     void publishStaticImuTransform()
     {
-        /* 先按单位变换发布；IMU 的安装方向/偏移确定后再改这里或加参数。 */
+        const double x = get_parameter("imu_x").as_double();
+        const double y = get_parameter("imu_y").as_double();
+        const double z = get_parameter("imu_z").as_double();
+        const double roll = get_parameter("imu_roll").as_double();
+        const double pitch = get_parameter("imu_pitch").as_double();
+        const double yaw = get_parameter("imu_yaw").as_double();
+
+        const double cr = std::cos(roll * 0.5);
+        const double sr = std::sin(roll * 0.5);
+        const double cp = std::cos(pitch * 0.5);
+        const double sp = std::sin(pitch * 0.5);
+        const double cy = std::cos(yaw * 0.5);
+        const double sy = std::sin(yaw * 0.5);
+
         geometry_msgs::msg::TransformStamped tf;
-        /* 静态 TF 用时间 0；用 now() 会让 tf2_monitor 把启动时刻到当前
+        /* 静态 TF 用时间 0；用 now() 会让 tf2_monitor 把启动时刻当前
          * 的时间差算成 imu_link 的巨大延迟。 */
         tf.header.stamp = rclcpp::Time(0, 0, get_clock()->get_clock_type());
         tf.header.frame_id = base_frame_;
         tf.child_frame_id = imu_frame_;
-        tf.transform.translation.x = 0.0;
-        tf.transform.translation.y = 0.0;
-        tf.transform.translation.z = 0.0;
-        tf.transform.rotation.x = 0.0;
-        tf.transform.rotation.y = 0.0;
-        tf.transform.rotation.z = 0.0;
-        tf.transform.rotation.w = 1.0;
+        tf.transform.translation.x = x;
+        tf.transform.translation.y = y;
+        tf.transform.translation.z = z;
+        tf.transform.rotation.x = sr * cp * cy - cr * sp * sy;
+        tf.transform.rotation.y = cr * sp * cy + sr * cp * sy;
+        tf.transform.rotation.z = cr * cp * sy - sr * sp * cy;
+        tf.transform.rotation.w = cr * cp * cy + sr * sp * sy;
         static_tf_broadcaster_.sendTransform(tf);
     }
 
@@ -507,6 +530,7 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr disarm_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr connect_srv_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::TimerBase::SharedPtr imu_tf_timer_;
     tf2_ros::TransformBroadcaster tf_broadcaster_;
     tf2_ros::StaticTransformBroadcaster static_tf_broadcaster_;
 };

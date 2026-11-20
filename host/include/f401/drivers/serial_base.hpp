@@ -37,6 +37,9 @@ public:
         std::int16_t temp_c10 = 0;
     };
 
+    /* M5 实测的里程计尺度；只用于 /odom 积分和 twist，不影响下发的 CMD。 */
+    static constexpr double kOdomWheelScale = 1.0325;
+
     explicit SerialBase(const std::string& device, int baud_rate = 115200);
 
     bool setVelocity(const core::ChassisSpeeds& cmd) override;

@@ -83,6 +83,8 @@ extern "C" {
 #define LINK_V2_IMU_MAG_OK 0x0002u
 #define LINK_V2_IMU_BMP_OK 0x0004u
 #define LINK_V2_IMU_GYRO_CAL 0x0008u
+#define LINK_V2_IMU_INIT_FAIL 0x0010u
+#define LINK_V2_IMU_READ_FAIL 0x0020u
 
 /* 时间参数：沿用现有固件的 300ms 遥控超时；遥测 50Hz。 */
 #define LINK_V2_CMD_TIMEOUT_MS 300u

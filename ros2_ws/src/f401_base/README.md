@@ -84,4 +84,16 @@ ros2 service call /robot/disarm std_srvs/srv/Trigger
   `teleop_twist_keyboard` 发布的是 `Twist`，暂不兼容。
 - `/imu/data_raw` 的 `orientation_covariance[0] = -1`，表示没有姿态；
   `/odom` 仍然只来自轮速，IMU 尚未参与融合。
-- `base_link -> imu_link` 目前是单位变换；IMU 安装方向/偏移确定后再改静态 TF。
+- `base_link -> imu_link` 的安装参数：
+
+  | 参数 | 含义 |
+  |---|---|
+  | `imu_x/y/z` | IMU 中心相对 base_link 的平移，m |
+  | `imu_roll/pitch/yaw` | IMU 相对 base_link 的旋转，rad |
+
+  `base_link` 当前定义为四轮中心的地面投影点：x 向前、y 向左、z 向上。
+  因此 `imu_z` 是 IMU 中心离地高度，`imu_x/y` 是 IMU 中心相对四轮中心的
+  前后/左右偏移。
+
+  节点每秒按当前参数重发静态 TF，所以可以先启动后用 `ros2 param set` 现场调，
+  确认后把值写进 [launch/f401_base.launch.py](launch/f401_base.launch.py)。

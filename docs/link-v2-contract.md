@@ -80,7 +80,7 @@ ROS 2 侧不直接解析 ASCII：`ros2_ws` 通过 `robot_link` 客户端走 TCP 
 | 10 | fault_mask | u16 LE | 四轮故障按位或 |
 | 12 | delta | 4×i16 LE | 自上一 TELEM 以来的编码器增量 |
 | 20 | rpm_x10 | 4×i16 LE | 四轮转速 ×10 |
-| 28 | imu_flags | u16 LE | VALID/MAG_OK/BMP_OK/GYRO_CAL |
+| 28 | imu_flags | u16 LE | VALID/MAG_OK/BMP_OK/GYRO_CAL；INIT_FAIL=0x10，READ_FAIL=0x20 |
 | 30 | acc_mg | 3×i16 LE | 加速度 mg，含重力 |
 | 36 | gyro_dps10 | 3×i16 LE | 角速度 0.1 deg/s |
 | 42 | mag_ut10 | 3×i16 LE | 磁场 0.1 uT |

@@ -11,9 +11,16 @@
 namespace f401::drivers {
 namespace {
 
-/* 编码器计数 -> 轮缘位移（米）。3960 计数/圈、轮径 80mm。 */
+/* M5 实测校准（2026-11-19，3 组）：
+ *   实际 1.000m -> odom 0.964/0.977/0.965m   -> k≈1.0324
+ *   实际 360°  -> odom 349.02/349.80/347.21° -> k≈1.0325
+ * 前进和旋转的误差比例一致，说明主要是轮缘位移的尺度偏小；
+ * 用一个统一轮速比例同时修正距离和由轮速反算的 yaw。
+ * 横移 0.5m 实测 0.499/0.491/0.488m，单独 k≈1.015；套用该统一比例后
+ * 约 0.509m，误差 1.7%，仍在 M5 的 5% 目标内。 */
 constexpr double kMetersPerCount =
-    f401::core::kPi * (F401_WHEEL_DIAMETER_MM / 1000.0) / F401_ENCODER_CPR;
+    f401::core::kPi * (F401_WHEEL_DIAMETER_MM / 1000.0) / F401_ENCODER_CPR *
+    SerialBase::kOdomWheelScale;
 
 /* TELEM 超过这个时间没更新，就认为里程计失效，不再返回旧位姿。 */
 constexpr auto kTelemetryTimeout = std::chrono::milliseconds(300);

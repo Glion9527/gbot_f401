@@ -43,6 +43,10 @@
 #include <math.h>
 /* USER CODE END Includes */
 
+#if IMU_DRIVER_ENABLE
+static uint8_t s_imu_ready;
+#endif
+
 #if IMU_DRIVER_ENABLE && ROBOT_APP_MODE == 7 && LINK_PROTOCOL_V2
 /* 把 ICM20948 的浮点数据量化成 TELEM 使用的整数。
  * 量化只发生在主循环，不在 10ms 中断里做 I2C 或浮点格式转换。 */
@@ -234,7 +238,14 @@ int main(void)
   /* IMU 初始化：复位 ICM、配置量程、开磁力计旁路、标定陀螺零偏（约 0.8s）。
    * 这 0.8 秒板子必须静止；期间电机不会动（电机在收到遥控指令前保持停止）。 */
 #if IMU_DRIVER_ENABLE
-  (void)ICM20948_Init();
+  s_imu_ready = (uint8_t)ICM20948_Init();
+#if ROBOT_APP_MODE == 7 && LINK_PROTOCOL_V2
+  if (!s_imu_ready) {
+    LinkV2ImuSample bad = {0};
+    bad.flags = LINK_V2_IMU_INIT_FAIL;
+    LinkV2_UpdateImu(&bad);
+  }
+#endif
 #endif
   /* USER CODE END 2 */
 
@@ -271,7 +282,9 @@ int main(void)
           }
         } else {
 #if ROBOT_APP_MODE == 7 && LINK_PROTOCOL_V2
-          LinkV2_UpdateImu(NULL);
+          LinkV2ImuSample bad = {0};
+          bad.flags = s_imu_ready ? LINK_V2_IMU_READ_FAIL : LINK_V2_IMU_INIT_FAIL;
+          LinkV2_UpdateImu(&bad);
 #endif
         }
       }
